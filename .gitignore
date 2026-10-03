@@ -1,0 +1,14 @@
+node_modules/
+data/
+dist/
+android/app/build/
+android/.gradle/
+*.apk
+*.exe
+Tickets-sauvegarde.json
+public/google-client.js
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/

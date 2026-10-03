@@ -1,0 +1,8 @@
+{
+  "name": "Tickets",
+  "short_name": "Tickets",
+  "start_url": "/v",
+  "display": "standalone",
+  "background_color": "#eef2f5",
+  "theme_color": "#163a5c"
+}

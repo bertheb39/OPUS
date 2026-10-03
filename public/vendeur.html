@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#163a5c">
+  <title>Tickets</title>
+  <link rel="stylesheet" href="app.css">
+  <link rel="manifest" href="manifest.webmanifest">
+</head>
+<body class="page-vendeur">
+  <header>
+    <strong>Tickets</strong>
+    <div class="header-actions">
+      <a id="to-admin" class="header-link" href="admin.html" hidden>Admin</a>
+      <button id="logout" type="button" hidden>Quitter</button>
+    </div>
+  </header>
+  <main id="app"></main>
+  <script src="qr.js"></script>
+  <script src="local-api.js"></script>
+  <script src="common.js"></script>
+  <script src="google-client.js?v=19"></script>
+  <script src="drive.js?v=21"></script>
+  <script src="vendeur.js"></script>
+</body>
+</html>

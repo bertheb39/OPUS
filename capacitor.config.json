@@ -1,0 +1,8 @@
+{
+  "appId": "com.opus.tickets",
+  "appName": "Tickets",
+  "webDir": "public",
+  "android": {
+    "allowMixedContent": false
+  }
+}

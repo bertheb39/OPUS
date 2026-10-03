@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>Tickets</title>
+</head>
+<body>
+  <p>Liaison Gmail…</p>
+  <script src="google-client.js?v=19"></script>
+  <script src="drive.js?v=21"></script>
+  <script>
+    finishOAuth()
+      .then(() => {
+        const next = sessionStorage.getItem('opus.oauthNext') || 'admin.html';
+        sessionStorage.removeItem('opus.oauthNext');
+        location.replace(next);
+      })
+      .catch((error) => { document.body.textContent = error.message || 'La liaison Gmail a échoué.'; });
+  </script>
+</body>
+</html>
