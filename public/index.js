@@ -197,7 +197,7 @@ async function boot() {
     } catch { /* écran de mot de passe */ }
   }
 
-  await showBrandSplash({ minMs: 1600 });
+  await showBrandSplash({ minMs: 900 });
 
   if (!needsSetup) {
     renderEnter({ setup: false });

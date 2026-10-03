@@ -125,6 +125,7 @@ function renderRouters() {
           <option value="local" ${mode === 'local' ? 'selected' : ''}>Adresse locale seulement</option>
           <option value="distant" ${mode === 'distant' ? 'selected' : ''}>VPN seulement</option>
         </select>
+        <p class="help">Auto essaie le Wi‑Fi puis le VPN. À distance, choisissez « VPN seulement » si le local reste lent à échouer.</p>
         <button type="submit">Enregistrer</button>
       </form>
     </section>
@@ -731,18 +732,19 @@ async function loadActifs() {
   }
   stopActifsPoll();
   if (state.tab === 'actifs' && state.authed) {
-    actifsTimer = setTimeout(() => { loadActifs(); }, 12000);
+    actifsTimer = setTimeout(() => { loadActifs(); }, 20000);
   }
 }
 
 async function refresh(message, options = {}) {
+  const light = Boolean(options.light) || Boolean(options.fromSubmit);
   if (options.fromSubmit) {
-    await loadWorkspace();
+    await loadWorkspace({ light: true });
     if (message) showToast(message, 'ok');
     return;
   }
   await runBusyRender(render, async () => {
-    await loadWorkspace();
+    await loadWorkspace({ light });
     if (message) showToast(message, 'ok');
   }, {
     before: () => { state.busy = true; },
@@ -1058,7 +1060,9 @@ app.addEventListener('click', async (event) => {
     }
     render({ resetScroll: true });
     if (state.tab === 'sales') {
-      refresh('').catch((error) => showToast(error.message, 'err'));
+      loadWorkspace({ light: false })
+        .then(() => { render(); })
+        .catch((error) => showToast(error.message, 'err'));
     }
     if (state.tab === 'actifs') loadActifs();
     return;
@@ -1305,22 +1309,24 @@ async function boot() {
   }
 
   setTimeout(() => { checkForUpdate(); }, 1500);
-  setTimeout(() => { warmWorkspaceInBackground(); }, 50);
+  setTimeout(() => { warmWorkspaceInBackground(); }, 4000);
 
   try {
     if (sessionStorage.getItem('opus.google.justLinked') === '1') {
       const outcome = await adoptGoogleBackup();
-      if (outcome === 'restored' || outcome === 'pulled') await refresh('');
+      if (outcome === 'restored' || outcome === 'pulled') await refresh('', { light: true });
       else if (outcome) render();
     } else if (typeof syncDriveNow === 'function') {
       const account = typeof readGoogleAccount === 'function' ? readGoogleAccount() : null;
       if (account && (account.refreshToken || account.accessToken)) {
-        syncDriveNow().then(async (outcome) => {
-          if (outcome === 'pulled') {
-            showToast('Données synchronisées depuis Drive.', 'ok');
-            await refresh('');
-          }
-        }).catch((error) => showToast(error.message, 'err'));
+        setTimeout(() => {
+          syncDriveNow().then(async (outcome) => {
+            if (outcome === 'pulled') {
+              showToast('Données synchronisées depuis Drive.', 'ok');
+              await refresh('', { light: true });
+            }
+          }).catch((error) => showToast(error.message, 'err'));
+        }, 2500);
       }
     }
   } catch (error) {
@@ -1333,10 +1339,10 @@ async function boot() {
       syncDriveNow().then(async (outcome) => {
         if (outcome === 'pulled') {
           showToast('Données synchronisées depuis Drive.', 'ok');
-          await refresh('');
+          await refresh('', { light: true });
         }
       }).catch(() => {});
-    }, 90000);
+    }, 180000);
   }
 }
 

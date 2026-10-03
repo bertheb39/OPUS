@@ -54,40 +54,87 @@ function dock(screen) {
   `;
 }
 
-function renderList() {
-  const cards = state.forfaits.map((forfait) => `
+function sellRows() {
+  const lotByProfile = new Map();
+  (state.lots || []).forEach((lot) => {
+    const key = String(lot.profile || '').trim();
+    if (!key) return;
+    lotByProfile.set(key, lot);
+  });
+  const seen = new Set();
+  const rows = [];
+  (state.forfaits || []).forEach((forfait) => {
+    const key = String(forfait.name || '').trim();
+    if (!key) return;
+    seen.add(key);
+    rows.push({ key, forfait, lot: lotByProfile.get(key) || null });
+  });
+  lotByProfile.forEach((lot, key) => {
+    if (seen.has(key)) return;
+    // Lots sans fiche forfait : seulement s’il reste des tickets à remettre.
+    if (!(lot.remaining > 0)) return;
+    rows.push({ key, forfait: null, lot });
+  });
+  rows.sort((a, b) => a.key.localeCompare(b.key, 'fr'));
+  return rows;
+}
+
+function renderSellCard(row) {
+  const forfait = row.forfait;
+  const lot = row.lot;
+  const name = row.key || 'Sans forfait';
+  const price = forfait && forfait.price != null ? forfait.price : (lot ? lot.price : null);
+  const validity = (forfait && forfait.validity) || (lot && lot.validity) || '—';
+  const limitUptime = (forfait && forfait.limitUptime) || (lot && lot.limitUptime) || '';
+  const stock = forfait ? Number(forfait.remaining) || 0 : 0;
+  const lotLeft = lot ? Number(lot.remaining) || 0 : 0;
+  const lotPending = lot ? Number(lot.pending) || 0 : 0;
+  const lotReady = Boolean(lot && lot.ready);
+
+  // Priorité aux tickets déjà sur le routeur (lots) pour éviter les doublons.
+  if (lotLeft > 0) {
+    return `
+      <article class="card">
+        <div class="profile-head">
+          <h2>${esc(name)}</h2>
+          <div class="price">${price == null ? '—' : esc(money(price))}</div>
+        </div>
+        <p class="meta">Valable ${esc(validity)} · ${esc(limitUptime)}</p>
+        <p class="meta">Déjà sur le routeur · ${esc(lotLeft)} à remettre${lotPending ? ` · ${esc(lotPending)} en attente` : ''}${stock > 0 ? ` · Stock app ${esc(stock)}` : ''}</p>
+        <button
+          class="btn-sell btn-block"
+          type="button"
+          data-action="sell-lot"
+          data-profile="${esc(name)}"
+          ${!lotReady || state.busy ? 'disabled' : ''}
+        >${lotReady ? 'Remettre' : 'Prix manquant'}</button>
+      </article>
+    `;
+  }
+
+  if (!forfait) return '';
+
+  return `
     <article class="card">
       <div class="profile-head">
-        <h2>${esc(forfait.name)}</h2>
-        <div class="price">${esc(money(forfait.price))}</div>
+        <h2>${esc(name)}</h2>
+        <div class="price">${price == null ? '—' : esc(money(price))}</div>
       </div>
-      <p class="meta">Valable ${esc(forfait.validity || '—')} · ${esc(forfait.limitUptime)}</p>
-      <p class="meta">Stock ${esc(forfait.remaining)}</p>
+      <p class="meta">Valable ${esc(validity)} · ${esc(limitUptime)}</p>
+      <p class="meta">Stock ${esc(stock)}</p>
       <button
         class="btn-sell btn-block"
         type="button"
         data-action="choose"
         data-id="${forfait.id}"
-        ${forfait.remaining < 1 || state.busy ? 'disabled' : ''}
-      >${forfait.remaining < 1 ? 'Stock épuisé' : 'Remettre'}</button>
+        ${stock < 1 || state.busy ? 'disabled' : ''}
+      >${stock < 1 ? 'Stock épuisé' : 'Remettre'}</button>
     </article>
-  `).join('');
-  const lots = state.lots.map((lot) => `
-    <article class="card">
-      <div class="profile-head">
-        <h2>${esc(lot.profile || 'Sans forfait')}</h2>
-        <div class="price">${lot.price == null ? '—' : esc(money(lot.price))}</div>
-      </div>
-      <p class="meta">Déjà sur le routeur · ${esc(lot.remaining)} à remettre${lot.pending ? ` · ${esc(lot.pending)} en attente` : ''}</p>
-      <button
-        class="btn-sell btn-block"
-        type="button"
-        data-action="sell-lot"
-        data-profile="${esc(lot.profile)}"
-        ${!lot.ready || lot.remaining < 1 || state.busy ? 'disabled' : ''}
-      >${lot.ready ? 'Remettre' : 'Prix manquant'}</button>
-    </article>
-  `).join('');
+  `;
+}
+
+function renderList() {
+  const cards = sellRows().map(renderSellCard).filter(Boolean).join('');
   const pendingCards = (state.pending || []).map((item) => `
     <article class="sale-card">
       <div class="sale-top">
@@ -118,9 +165,7 @@ function renderList() {
           ${pendingCards}
         </section>
       ` : ''}
-      ${cards}
-      ${lots}
-      ${cards || lots ? '' : '<section class="card"><p class="meta">Aucun forfait.</p></section>'}
+      ${cards || '<section class="card"><p class="meta">Aucun forfait.</p></section>'}
     </div>
     ${dock('list')}
   `;
@@ -367,7 +412,7 @@ async function loadActifs() {
   }
   stopActifsPoll();
   if (state.screen === 'actifs' && state.authed) {
-    actifsTimer = setTimeout(() => { loadActifs(); }, 12000);
+    actifsTimer = setTimeout(() => { loadActifs(); }, 20000);
   }
 }
 
@@ -652,9 +697,6 @@ async function boot() {
   }
   render({ resetScroll: true });
   setTimeout(() => { checkForUpdate(); }, 1500);
-  if (state.authed && typeof scheduleDriveBackup === 'function') {
-    setTimeout(() => { scheduleDriveBackup(); }, 10000);
-  }
 }
 
 boot();

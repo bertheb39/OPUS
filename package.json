@@ -1,6 +1,6 @@
 {
   "name": "tickets",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "type": "module",
   "main": "electron/main.mjs",
@@ -52,11 +52,11 @@
           ]
         }
       ],
-      "artifactName": "Tickets-2.1.exe",
+      "artifactName": "Tickets-2.2.exe",
       "signAndEditExecutable": false
     },
     "portable": {
-      "artifactName": "Tickets-2.1.exe"
+      "artifactName": "Tickets-2.2.exe"
     },
     "asar": true
   },

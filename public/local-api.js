@@ -392,7 +392,7 @@ async function rematchAllScriptSales() {
   if (scriptSalesRematchBusy) return scriptSalesRematchBusy;
   scriptSalesRematchBusy = (async () => {
     const [sales, resellers] = await Promise.all([getAll('sales'), getAll('resellers')]);
-    let updated = 0;
+    const changed = [];
     for (const sale of sales) {
       if (!sale.script_key) continue;
       const owner = matchResellerForScript({
@@ -406,10 +406,15 @@ async function rematchAllScriptSales() {
       }
       sale.reseller_id = nextId;
       sale.reseller_name = nextName;
-      await putOne('sales', sale);
-      updated += 1;
+      changed.push(sale);
     }
-    return updated;
+    if (!changed.length) return 0;
+    const db = await openDatabase();
+    const tx = db.transaction(['sales'], 'readwrite');
+    const store = tx.objectStore('sales');
+    changed.forEach((sale) => { store.put(sale); });
+    await transactionDone(tx);
+    return changed.length;
   })();
   try {
     return await scriptSalesRematchBusy;
@@ -467,9 +472,9 @@ function previousMonthKey(date = new Date()) {
 }
 
 const scriptListCache = new Map();
-const SCRIPT_LIST_TTL_MS = 45000;
+const SCRIPT_LIST_TTL_MS = 90000;
 const syncSalesCache = new Map();
-const SYNC_SALES_TTL_MS = 25000;
+const SYNC_SALES_TTL_MS = 60000;
 let salesPurgeClean = false;
 
 function scriptListCacheKey(router, owners) {
@@ -1077,20 +1082,25 @@ async function routerRun(router, commands, timeoutMs) {
     throw error;
   }
   const fullTimeout = timeoutMs || 15000;
-  let lastError;
+  const attempts = [];
   for (let index = 0; index < hosts.length; index += 1) {
-    const budget = index < hosts.length - 1 ? Math.min(fullTimeout, 4000) : fullTimeout;
+    // En multi-adresses (local + VPN), ne pas rester longtemps bloqué sur la première.
+    const budget = index < hosts.length - 1 ? Math.min(fullTimeout, 2500) : fullTimeout;
     try {
       const result = await routerRunOnce({ ...router, host: hosts[index] }, commands, budget);
       writeLastGoodHost(router.id, hosts[index]);
       return result;
     } catch (error) {
-      lastError = error;
-      const retry = index < hosts.length - 1 && error.code !== 'TRAP';
-      if (!retry) throw error;
+      attempts.push({ host: hosts[index], error });
+      // Toujours tenter l’autre adresse : une erreur d’auth sur le local
+      // ne doit pas empêcher d’essayer le VPN (et inversement).
+      if (index >= hosts.length - 1) break;
     }
   }
-  throw lastError;
+  const trap = attempts.find((item) => item.error && item.error.code === 'TRAP');
+  if (trap) throw trap.error;
+  const last = attempts[attempts.length - 1];
+  throw (last && last.error) || new Error('Impossible de joindre le routeur.');
 }
 
 async function testRouter(router) {
@@ -1390,7 +1400,7 @@ async function syncHapSales({ resellerId = 0, routerId = 0, from = '', to = '', 
     ]);
     const selected = allRouters.filter((router) => !routerId || Number(router.id) === Number(routerId));
     if (!selected.length) {
-      return { created: 0, read: 0, unmatched: 0, warning: 'Aucun routeur enregistré.' };
+      return { created: 0, removed: 0, read: 0, unmatched: 0, warning: 'Aucun routeur enregistré.' };
     }
     await rematchOrphanScriptSales();
     const owners = scriptOwnersBetween(windowFrom, windowTo);
@@ -1474,6 +1484,7 @@ async function syncHapSales({ resellerId = 0, routerId = 0, from = '', to = '', 
         entries,
         String(windowFrom).slice(0, 10),
         String(windowTo).slice(0, 10),
+        sales,
       );
       removed += removedHere;
       if (createdHere || removedHere) invalidateScriptListCache(baseRouter.id);
@@ -1503,12 +1514,7 @@ async function syncHapSales({ resellerId = 0, routerId = 0, from = '', to = '', 
 }
 
 
-async function pendingRemises(resellerId) {
-  const [assigned, profiles, routers] = await Promise.all([
-    getAll('assigned'),
-    getAll('profiles'),
-    getAll('routers'),
-  ]);
+function pendingRemisesFrom(assigned, profiles, routers, resellerId) {
   return assigned
     .filter((item) => Number(item.reseller_id) === Number(resellerId) && item.handed_at)
     .map((item) => {
@@ -1533,6 +1539,15 @@ async function pendingRemises(resellerId) {
     .sort((a, b) => String(b.handedAt || '').localeCompare(String(a.handedAt || '')));
 }
 
+async function pendingRemises(resellerId) {
+  const [assigned, profiles, routers] = await Promise.all([
+    getAll('assigned'),
+    getAll('profiles'),
+    getAll('routers'),
+  ]);
+  return pendingRemisesFrom(assigned, profiles, routers, resellerId);
+}
+
 async function listActiveSessions(router) {
   const results = await routerRun(router, [[
     '/ip/hotspot/active/print',
@@ -1542,14 +1557,6 @@ async function listActiveSessions(router) {
 }
 
 async function activeUsersView({ resellerId = 0, routerId = 0 } = {}) {
-  const month = currentMonthKey();
-  // Sync en arrière-plan non bloquant : les sessions actives restent lisibles tout de suite.
-  syncHapSales({
-    resellerId,
-    routerId,
-    from: `${month}-01`,
-    to: localDateISO(new Date()),
-  }).catch(() => {});
   const routers = await getAll('routers');
   const selected = routers.filter((router) => !routerId || Number(router.id) === Number(routerId));
   const [sales, assigned, resellers] = await Promise.all([
@@ -1557,6 +1564,8 @@ async function activeUsersView({ resellerId = 0, routerId = 0 } = {}) {
     getAll('assigned'),
     getAll('resellers'),
   ]);
+  const salesByKey = new Map(sales.map((sale) => [`${sale.router_id}:${sale.code}`, sale]));
+  const assignedByKey = new Map(assigned.map((item) => [`${item.router_id}:${item.name}`, item]));
   const lockedReseller = resellerId ? await getOne('resellers', resellerId) : null;
   const sessions = [];
   let warning = '';
@@ -1590,8 +1599,8 @@ async function activeUsersView({ resellerId = 0, routerId = 0 } = {}) {
     rows.forEach((row) => {
       const code = String(row.user || '').trim();
       if (!code) return;
-      const sale = sales.find((item) => Number(item.router_id) === Number(base.id) && item.code === code);
-      const held = assigned.find((item) => Number(item.router_id) === Number(base.id) && item.name === code);
+      const sale = salesByKey.get(`${base.id}:${code}`);
+      const held = assignedByKey.get(`${base.id}:${code}`);
       if (lockedReseller) {
         if (!paidCodes.has(code)) return;
       }
@@ -1702,17 +1711,19 @@ async function purgeNonScriptSales() {
 }
 
 /** Retire les ventes locales dont le script MikroTik n’existe plus (lecture réussie uniquement). */
-async function reconcileMissingScriptSales(routerId, entries, windowFrom, windowTo) {
+async function reconcileMissingScriptSales(routerId, entries, windowFrom, windowTo, salesRows = null) {
   const liveKeys = new Set((entries || []).map((entry) => entry.scriptName).filter(Boolean));
-  const sales = await getAll('sales');
+  const sales = salesRows || await getAll('sales');
   let removed = 0;
-  for (const sale of sales) {
+  for (let index = sales.length - 1; index >= 0; index -= 1) {
+    const sale = sales[index];
     if (Number(sale.router_id) !== Number(routerId)) continue;
     if (!sale.script_key) continue;
     const day = String(sale.sale_date || '').slice(0, 10);
     if (day && (day < windowFrom || day > windowTo)) continue;
     if (liveKeys.has(sale.script_key)) continue;
     await deleteOne('sales', sale.id);
+    if (salesRows) sales.splice(index, 1);
     removed += 1;
   }
   return removed;
@@ -2345,7 +2356,7 @@ async function handle(method, url, body) {
         routerId: range.routerId,
         from: range.from,
         to: range.to,
-        force: true,
+        force: query.get('force') === '1',
       });
     const rows = await reportRows(range);
     const resellers = await getAll('resellers');
@@ -2354,8 +2365,12 @@ async function handle(method, url, body) {
     if (range.resellerId) {
       pendingItems = await pendingRemises(range.resellerId);
     } else {
+      const allAssigned = await getAll('assigned');
+      const allProfiles = await getAll('profiles');
       for (const reseller of resellers) {
-        pendingItems = pendingItems.concat(await pendingRemises(reseller.id));
+        pendingItems = pendingItems.concat(
+          pendingRemisesFrom(allAssigned, allProfiles, routers, reseller.id),
+        );
       }
     }
     if (range.routerId) {
@@ -2393,13 +2408,6 @@ async function handle(method, url, body) {
   if (method === 'GET' && path === '/api/admin/usage') {
     const range = reportWindow(query, 0);
     if (!range) return fail(400, 'La période est invalide.');
-    await syncHapSales({
-      resellerId: range.resellerId,
-      routerId: range.routerId,
-      from: range.from,
-      to: range.to,
-      force: range.from < range.monthFrom,
-    });
     const rows = await reportRows(range);
     const usage = await usageMap(rows.periodRows);
     return ok(usage);
@@ -2510,7 +2518,7 @@ async function handle(method, url, body) {
       resellerId: resellerSession.id,
       from: range.from,
       to: range.to,
-      force: true,
+      force: query.get('force') === '1',
     });
     const rows = await reportRows(range);
     const resellers = await getAll('resellers');
@@ -2552,12 +2560,6 @@ async function handle(method, url, body) {
   if (method === 'GET' && path === '/api/vendeur/usage') {
     const range = reportWindow(query, resellerSession.id);
     if (!range) return fail(400, 'La période est invalide.');
-    await syncHapSales({
-      resellerId: resellerSession.id,
-      from: range.from,
-      to: range.to,
-      force: range.from < range.monthFrom,
-    });
     const rows = await reportRows(range);
     return ok(await usageMap(rows.periodRows));
   }
@@ -2703,7 +2705,7 @@ async function handle(method, url, body) {
       return fail(502, error.message || 'Impossible de vérifier ce ticket sur le routeur.');
     }
     if (scriptHit) {
-      await syncHapSales({ resellerId: reseller.id, force: true });
+      await syncHapSales({ resellerId: reseller.id, force: false });
       return fail(400, `Ce ticket est déjà connecté depuis le ${scriptHit.date} à ${scriptHit.time}. Ne le remettez pas.`);
     }
     const handedAt = new Date().toISOString();
@@ -2728,7 +2730,7 @@ async function handle(method, url, body) {
       return fail(502, error.message || 'Impossible de vérifier ce ticket sur le routeur.');
     }
     if (scriptHit) {
-      await syncHapSales({ resellerId: reseller.id, force: true });
+      await syncHapSales({ resellerId: reseller.id, force: false });
       return ok({
         status: 'sold',
         code,
@@ -2784,7 +2786,7 @@ async function handle(method, url, body) {
       return fail(502, error.message || 'Impossible de vérifier ce ticket sur le routeur.');
     }
     if (scriptHit) {
-      await syncHapSales({ resellerId: reseller.id, force: true });
+      await syncHapSales({ resellerId: reseller.id, force: false });
       return fail(400, `Ce ticket est déjà connecté depuis le ${scriptHit.date} à ${scriptHit.time}. Annulation impossible.`);
     }
     const ticket = (await getAll('assigned')).find((item) => (
