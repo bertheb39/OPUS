@@ -46,9 +46,9 @@ function renderSetup() {
       <h1>Compte administrateur</h1>
       <form data-form="setup">
         <label for="password">Mot de passe</label>
-        <input id="password" name="password" type="password" autocomplete="new-password" required minlength="8">
+        ${passwordField({ id: 'password', name: 'password', autocomplete: 'new-password', required: true, minlength: 8 })}
         <label for="confirm">Confirmer</label>
-        <input id="confirm" name="confirm" type="password" autocomplete="new-password" required minlength="8">
+        ${passwordField({ id: 'confirm', name: 'confirm', autocomplete: 'new-password', required: true, minlength: 8 })}
         <button type="submit" ${state.busy ? 'disabled' : ''}>Créer</button>
       </form>
     </section>
@@ -61,7 +61,7 @@ function renderLogin() {
       <h1>Administration</h1>
       <form data-form="login">
         <label for="password">Mot de passe</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        ${passwordField({ id: 'password', name: 'password', autocomplete: 'current-password', required: true })}
         <button class="btn-block" type="submit" ${state.busy ? 'disabled' : ''}>Entrer</button>
       </form>
     </section>
@@ -85,7 +85,7 @@ function renderRouters() {
     return `
       <article class="card">
         <h2>${esc(router.name)}</h2>
-        <p class="meta">${esc(router.host)}${router.admin_host ? ` · ZT ${esc(router.admin_host)}` : ''} · ${esc(router.username)}</p>
+        <p class="meta">${esc(router.host)}${router.admin_host ? ` · VPN ${esc(router.admin_host)}` : ''} · ${esc(router.username)}</p>
         <div class="actions">
           <button type="button" data-action="test-router" data-id="${router.id}" ${state.busy ? 'disabled' : ''}>${state.busy && state.busyAction === `test-${router.id}` ? 'Test…' : 'Tester'}</button>
           <button type="button" data-action="sync-router" data-id="${router.id}" ${state.busy ? 'disabled' : ''}>Forfaits</button>
@@ -98,12 +98,12 @@ function renderRouters() {
             <input name="name" value="${esc(router.name)}" required>
             <label>Adresse locale (Wi-Fi)</label>
             <input name="host" value="${esc(router.host)}" required>
-            <label>Adresse ZeroTier (admin)</label>
+            <label>Adresse VPN (admin)</label>
             <input name="admin_host" value="${esc(router.admin_host || '')}" placeholder="Facultatif">
             <label>Utilisateur API</label>
             <input name="username" value="${esc(router.username)}" required>
             <label>Mot de passe API</label>
-            <input name="password" type="password" autocomplete="new-password" placeholder="Inchangé si vide">
+            ${passwordField({ name: 'password', autocomplete: 'new-password', placeholder: 'Inchangé si vide' })}
             <input name="port" type="hidden" value="${esc(router.port)}">
             <div class="actions">
               <button type="submit">Enregistrer</button>
@@ -121,9 +121,9 @@ function renderRouters() {
       <form data-form="reach" class="stack">
         <label>Joindre via</label>
         <select name="mode">
-          <option value="auto" ${mode === 'auto' ? 'selected' : ''}>Auto (local puis ZeroTier)</option>
+          <option value="auto" ${mode === 'auto' ? 'selected' : ''}>Auto (local puis VPN)</option>
           <option value="local" ${mode === 'local' ? 'selected' : ''}>Adresse locale seulement</option>
-          <option value="distant" ${mode === 'distant' ? 'selected' : ''}>ZeroTier seulement</option>
+          <option value="distant" ${mode === 'distant' ? 'selected' : ''}>VPN seulement</option>
         </select>
         <button type="submit">Enregistrer</button>
       </form>
@@ -135,12 +135,12 @@ function renderRouters() {
         <input name="name" required placeholder="HORIZON TEAM">
         <label>Adresse locale (Wi-Fi)</label>
         <input name="host" required placeholder="192.168.88.1" inputmode="decimal">
-        <label>Adresse ZeroTier (admin)</label>
+        <label>Adresse VPN (admin)</label>
         <input name="admin_host" placeholder="Facultatif">
         <label>Utilisateur API</label>
         <input name="username" required autocomplete="off">
         <label>Mot de passe API</label>
-        <input name="password" type="password" autocomplete="new-password" required>
+        ${passwordField({ name: 'password', autocomplete: 'new-password', required: true })}
         <button type="submit">Enregistrer</button>
       </form>
     </section>
@@ -228,9 +228,9 @@ function renderResellers() {
           <label>Routeur</label>
           <select name="routerId" required>${routerOptions(reseller.routerId)}</select>
           <label>Adresse routeur</label>
-          <input name="host" value="${esc(reseller.host || reseller.reachHost || '')}" placeholder="IP locale ou ZeroTier" required>
+          <input name="host" value="${esc(reseller.host || reseller.reachHost || '')}" placeholder="IP locale ou VPN" required>
           <label>Nouveau mot de passe</label>
-          <input name="password" type="password" autocomplete="new-password" placeholder="Inchangé si vide">
+          ${passwordField({ name: 'password', autocomplete: 'new-password', placeholder: 'Inchangé si vide' })}
           <button type="submit">Enregistrer</button>
         </form>
       </article>
@@ -248,7 +248,7 @@ function renderResellers() {
         <label>Taux à reverser (%)</label>
         <input name="ratePercent" type="number" min="0" max="100" step="0.01" placeholder="Ex. 75" inputmode="decimal" required>
         <label>Mot de passe</label>
-        <input name="password" type="password" minlength="4" autocomplete="new-password" required>
+        ${passwordField({ name: 'password', autocomplete: 'new-password', required: true, minlength: 4 })}
         <label>Routeur</label>
         <select name="routerId" required>${routerOptions('')}</select>
         <label>Adresse routeur</label>

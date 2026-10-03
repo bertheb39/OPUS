@@ -41,7 +41,7 @@ function renderEnter(options = {}) {
         : 'Mot de passe administration ou revendeur.'}</p>
       <form data-form="enter">
         <label for="password">Mot de passe</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        ${passwordField({ id: 'password', name: 'password', autocomplete: 'current-password', required: true })}
         <button class="btn-sell btn-block" type="submit" ${busy ? 'disabled' : ''}>Entrer</button>
       </form>
       <button class="btn-quiet btn-block" type="button" data-action="welcome">Retour</button>
@@ -203,12 +203,14 @@ async function boot() {
     renderEnter({ setup: false });
     const notice = consumeNotice();
     if (notice) showToast(notice, 'err');
+    setTimeout(() => { checkForUpdate(); }, 1200);
     return;
   }
 
   renderWelcome();
   const notice = consumeNotice();
   if (notice) showToast(notice, 'err');
+  setTimeout(() => { checkForUpdate(); }, 1200);
 }
 
 boot();

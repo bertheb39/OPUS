@@ -6,7 +6,7 @@ function networkMessage(error) {
     return 'Impossible de joindre le routeur : le port API est fermé.';
   }
   if (error?.code === 'ETIMEDOUT' || error?.code === 'EHOSTUNREACH' || error?.code === 'ENETUNREACH') {
-    return 'Impossible de joindre le routeur. Vérifiez l\'adresse (Wi-Fi ou ZeroTier) et la connexion.';
+    return 'Impossible de joindre le routeur. Vérifiez l\'adresse (Wi-Fi ou VPN) et la connexion.';
   }
   if (error?.code === 'ENOTFOUND') return 'Adresse du routeur introuvable.';
   return 'Impossible de joindre le routeur.';

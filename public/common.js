@@ -8,6 +8,53 @@ function esc(value) {
   }[char]));
 }
 
+function passwordField(options = {}) {
+  const {
+    id = '',
+    name = 'password',
+    autocomplete = 'current-password',
+    required = false,
+    minlength = '',
+    placeholder = '',
+    value = '',
+  } = options;
+  const attrs = [
+    id ? `id="${esc(id)}"` : '',
+    `name="${esc(name)}"`,
+    'type="password"',
+    `autocomplete="${esc(autocomplete)}"`,
+    required ? 'required' : '',
+    minlength !== '' && minlength != null ? `minlength="${esc(String(minlength))}"` : '',
+    placeholder ? `placeholder="${esc(placeholder)}"` : '',
+    value !== '' && value != null ? `value="${esc(value)}"` : '',
+  ].filter(Boolean).join(' ');
+  return `<div class="password-field">
+    <input ${attrs}>
+    <button type="button" class="password-toggle" data-toggle-password aria-label="Afficher le mot de passe" title="Afficher le mot de passe">
+      <svg class="password-icon-show" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
+      <svg class="password-icon-hide" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18"/><path d="M10.6 10.6a2 2 0 102.8 2.8"/><path d="M9.9 5.1A10.5 10.5 0 0112 5c6.5 0 10 7 10 7a18.5 18.5 0 01-2.2 3.2"/><path d="M6.1 6.1C3.1 8.2 2 12 2 12s3.5 7 10 7a10.8 10.8 0 004.2-.8"/></svg>
+    </button>
+  </div>`;
+}
+
+if (!window.__opusPasswordToggleBound) {
+  window.__opusPasswordToggleBound = true;
+  document.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-toggle-password]');
+    if (!button) return;
+    event.preventDefault();
+    const wrap = button.closest('.password-field');
+    const input = wrap && wrap.querySelector('input');
+    if (!input) return;
+    const show = input.type === 'password';
+    input.type = show ? 'text' : 'password';
+    button.classList.toggle('is-visible', show);
+    const label = show ? 'Masquer le mot de passe' : 'Afficher le mot de passe';
+    button.setAttribute('aria-label', label);
+    button.title = label;
+  });
+}
+
 let sheetScrollToken = 0;
 
 function restoreSheetScroll(top) {
@@ -155,7 +202,7 @@ async function api(url, options = {}) {
   return localApi(url, options);
 }
 
-const APP_VERSION = '2.0';
+const APP_VERSION = '2.1';
 const activityKey = 'opus.activity';
 const updateUrlKey = 'opus.updateUrl';
 const currencyKey = 'opus.currency';

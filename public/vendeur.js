@@ -29,7 +29,7 @@ function renderLogin() {
       <h1>Vente</h1>
       <form data-form="login">
         <label for="password">Mot de passe</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        ${passwordField({ id: 'password', name: 'password', autocomplete: 'current-password', required: true })}
         <button class="btn-sell btn-block" type="submit" ${state.busy ? 'disabled' : ''}>Entrer</button>
       </form>
     </section>

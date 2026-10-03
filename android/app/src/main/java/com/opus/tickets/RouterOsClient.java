@@ -70,9 +70,9 @@ final class RouterOsClient {
         } catch (java.net.ConnectException error) {
             throw new IOException("Impossible de joindre le routeur : le port API est fermé.");
         } catch (java.net.SocketTimeoutException error) {
-            throw new IOException("Le routeur ne répond pas. Vérifiez l'adresse (Wi-Fi ou ZeroTier) et la connexion.");
+            throw new IOException("Le routeur ne répond pas. Vérifiez l'adresse (Wi-Fi ou VPN) et la connexion.");
         } catch (java.net.NoRouteToHostException | java.net.PortUnreachableException error) {
-            throw new IOException("Impossible de joindre le routeur. Vérifiez l'adresse (Wi-Fi ou ZeroTier) et la connexion.");
+            throw new IOException("Impossible de joindre le routeur. Vérifiez l'adresse (Wi-Fi ou VPN) et la connexion.");
         } finally {
             socket.close();
         }

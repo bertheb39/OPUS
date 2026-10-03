@@ -774,6 +774,7 @@ async function buildResellerInvite(resellerId) {
     opusInvite: 1,
     createdAt: new Date().toISOString(),
     currency: localStorage.getItem('opus.currency') || 'XOF',
+    updateUrl: localStorage.getItem('opus.updateUrl') || '',
     reseller,
     router,
     profiles,
@@ -819,6 +820,9 @@ async function importResellerInvite(token) {
   }
   const currency = String(pack.currency || '');
   if (['XOF', 'CDF', 'EUR', 'USD'].includes(currency)) localStorage.setItem('opus.currency', currency);
+  if (typeof pack.updateUrl === 'string' && pack.updateUrl.trim()) {
+    localStorage.setItem('opus.updateUrl', pack.updateUrl.trim());
+  }
   writeSession(null);
   return { name: pack.reseller.hmp_name || 'revendeur' };
 }
