@@ -687,7 +687,6 @@ async function replaceDatabase(snapshot) {
 async function exportSnapshot() {
   const snapshot = { opus: 1, savedAt: new Date().toISOString() };
   snapshot.currency = localStorage.getItem('opus.currency') || 'XOF';
-  snapshot.updateUrl = localStorage.getItem('opus.updateUrl') || '';
   for (const name of backupStores) snapshot[name] = await getAll(name);
   return snapshot;
 }
@@ -703,7 +702,6 @@ async function importSnapshot(snapshot) {
   await replaceDatabase({ ...snapshot, assigned: Array.isArray(snapshot.assigned) ? snapshot.assigned : [] });
   const currency = String(snapshot.currency || '');
   if (['XOF', 'CDF', 'EUR', 'USD'].includes(currency)) localStorage.setItem('opus.currency', currency);
-  if (typeof snapshot.updateUrl === 'string') localStorage.setItem('opus.updateUrl', snapshot.updateUrl);
   writeSession({ type: 'admin', id: snapshot.admins[0].id });
 }
 
@@ -779,7 +777,6 @@ async function buildResellerInvite(resellerId) {
     opusInvite: 1,
     createdAt: new Date().toISOString(),
     currency: localStorage.getItem('opus.currency') || 'XOF',
-    updateUrl: localStorage.getItem('opus.updateUrl') || '',
     reseller,
     router,
     profiles,
@@ -825,9 +822,6 @@ async function importResellerInvite(token) {
   }
   const currency = String(pack.currency || '');
   if (['XOF', 'CDF', 'EUR', 'USD'].includes(currency)) localStorage.setItem('opus.currency', currency);
-  if (typeof pack.updateUrl === 'string' && pack.updateUrl.trim()) {
-    localStorage.setItem('opus.updateUrl', pack.updateUrl.trim());
-  }
   writeSession(null);
   return { name: pack.reseller.hmp_name || 'revendeur' };
 }

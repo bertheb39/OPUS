@@ -158,6 +158,7 @@ app.addEventListener('submit', async (event) => {
 
 async function boot() {
   document.body.classList.add('gate');
+  if (await enforceAppUpdate()) return;
 
   const pendingRestore = sessionStorage.getItem('opus.google.justLinked') === '1'
     && sessionStorage.getItem('opus.restoreIntent') === '1';
@@ -203,14 +204,12 @@ async function boot() {
     renderEnter({ setup: false });
     const notice = consumeNotice();
     if (notice) showToast(notice, 'err');
-    setTimeout(() => { checkForUpdate(); }, 1200);
     return;
   }
 
   renderWelcome();
   const notice = consumeNotice();
   if (notice) showToast(notice, 'err');
-  setTimeout(() => { checkForUpdate(); }, 1200);
 }
 
 boot();

@@ -146,7 +146,6 @@ function renderRouters() {
       </form>
     </section>
     ${renderCurrency()}
-    ${renderUpdate()}
     ${renderBackup()}
     ${cards || '<p class="meta">Aucun routeur.</p>'}
   `;
@@ -426,19 +425,6 @@ function renderBackup() {
   `;
 }
 
-function renderUpdate() {
-  return `
-    <section class="card">
-      <h2>Mise à jour</h2>
-      <p class="meta">Version installée ${esc(APP_VERSION)}</p>
-      <p class="help">Indiquez le dépôt GitHub (<code>owner/repo</code>) pour détecter automatiquement la dernière release, ou un lien direct vers un fichier <code>Tickets-x.y.apk</code>.</p>
-      <form data-form="update-url" class="field-row">
-        <input name="updateUrl" value="${esc(readUpdateUrl())}" placeholder="owner/Tickets ou https://github.com/owner/Tickets" inputmode="url" autocomplete="off" aria-label="Dépôt GitHub ou lien APK">
-        <button type="submit">OK</button>
-      </form>
-    </section>
-  `;
-}
 function renderSales() {
   const sales = state.sales;
   const rows = (sales?.sales || []).map((sale) => `
@@ -914,26 +900,6 @@ app.addEventListener('submit', async (event) => {
       await loadActifs();
       return;
     }
-    if (form.dataset.form === 'update-url') {
-      const url = String(data.updateUrl || '').trim();
-      if (url) {
-        const repo = typeof parseGithubRepo === 'function' ? parseGithubRepo(url) : '';
-        const direct = typeof isDirectApkUrl === 'function' && isDirectApkUrl(url);
-        if (!repo && !direct) {
-          showToast('Indiquez owner/repo GitHub, ou un lien https vers un .apk.', 'err');
-          return;
-        }
-        if (direct && !versionFromApkUrl(url)) {
-          showToast('Le nom du fichier doit contenir le numéro, comme Tickets-1.3.apk.', 'err');
-          return;
-        }
-      }
-      saveUpdateUrl(url);
-      checkForUpdate.done = false;
-      showToast(url ? 'Source de mise à jour enregistrée.' : 'Vérification retirée.', 'ok');
-      if (url) checkForUpdate();
-      return;
-    }
     if (form.dataset.form === 'currency') {
       saveCurrency(data.currency);
       showToast('Devise enregistrée.', 'ok');
@@ -1260,6 +1226,7 @@ async function idleLogout() {
 
 async function boot() {
   watchIdle(idleLogout);
+  if (await enforceAppUpdate()) return;
   try {
     const status = await api('/api/status');
     state.needsSetup = status.needsSetup;
@@ -1308,7 +1275,6 @@ async function boot() {
     render();
   }
 
-  setTimeout(() => { checkForUpdate(); }, 1500);
   setTimeout(() => { warmWorkspaceInBackground(); }, 4000);
 
   try {

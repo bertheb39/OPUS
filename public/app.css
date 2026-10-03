@@ -486,6 +486,43 @@ button:disabled { opacity: 0.55; cursor: default; }
 .toast-err { background: var(--danger); }
 .toast-out { opacity: 0; }
 
+.update-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(10, 24, 40, 0.92);
+}
+
+.update-gate-card {
+  width: min(420px, 100%);
+  background: var(--card, #fff);
+  border-radius: 16px;
+  padding: 20px 16px;
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.update-gate-card h1 {
+  margin-bottom: 10px;
+}
+
+.update-gate-card p {
+  margin: 0 0 10px;
+}
+
+body.update-locked {
+  overflow: hidden;
+}
+
+body.update-locked > *:not(#update-gate) {
+  pointer-events: none;
+  user-select: none;
+}
+
 .modal-overlay {
   position: fixed;
   z-index: 90;

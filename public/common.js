@@ -202,9 +202,9 @@ async function api(url, options = {}) {
   return localApi(url, options);
 }
 
-const APP_VERSION = '2.2';
+const APP_VERSION = '2.3';
+const UPDATE_REPO = 'bertheb39/OPUS';
 const activityKey = 'opus.activity';
-const updateUrlKey = 'opus.updateUrl';
 const currencyKey = 'opus.currency';
 const ownerKey = 'opus.owner';
 const noticeKey = 'opus.notice';
@@ -255,64 +255,122 @@ function watchIdle(onIdle) {
   });
 }
 
-function readUpdateUrl() {
-  return localStorage.getItem(updateUrlKey) || '';
-}
-
-function saveUpdateUrl(url) {
-  const value = String(url || '').trim();
-  if (value) localStorage.setItem(updateUrlKey, value);
-  else localStorage.removeItem(updateUrlKey);
-}
-
-function versionFromApkUrl(url) {
-  const match = String(url || '').match(/(\d+\.\d+(?:\.\d+)?)(?=\.apk\b)/i);
+function versionFromReleaseName(name) {
+  const match = String(name || '').match(/(\d+\.\d+(?:\.\d+)?)(?=\.(?:apk|exe)\b)/i);
   return match ? match[1] : '';
 }
 
-function parseGithubRepo(value) {
-  const text = String(value || '').trim().replace(/\/+$/, '');
-  const short = text.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
-  if (short) return `${short[1]}/${short[2]}`;
-  const full = text.match(/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/i);
-  if (full) return `${full[1]}/${full[2]}`;
-  return '';
+function versionFromApkUrl(url) {
+  return versionFromReleaseName(url);
 }
 
-function isDirectApkUrl(url) {
-  return /^https?:\/\//i.test(String(url || '')) && /\.apk(\?|#|$)/i.test(String(url || ''));
+function isAndroidApp() {
+  return Boolean(window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.RouterOs);
 }
 
-async function resolveUpdateFromGithub(repo) {
-  const response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+function pickReleaseAsset(assets) {
+  const list = Array.isArray(assets) ? assets : [];
+  if (isAndroidApp()) {
+    return list.find((item) => /Tickets-.*\.apk$/i.test(item.name || ''))
+      || list.find((item) => /\.apk$/i.test(item.name || ''))
+      || null;
+  }
+  return list.find((item) => /Tickets-.*\.exe$/i.test(item.name || ''))
+    || list.find((item) => /\.exe$/i.test(item.name || ''))
+    || list.find((item) => /Tickets-.*\.apk$/i.test(item.name || ''))
+    || null;
+}
+
+async function resolveLatestReleaseUpdate() {
+  const response = await fetch(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, {
     headers: { Accept: 'application/vnd.github+json' },
   });
   if (response.status === 404) return null;
   if (!response.ok) {
-    throw new Error('Impossible de lire la dernière release GitHub.');
+    throw new Error('Impossible de vérifier la mise à jour.');
   }
   const release = await response.json();
-  const assets = Array.isArray(release.assets) ? release.assets : [];
-  const apk = assets.find((item) => /Tickets-.*\.apk$/i.test(item.name || ''))
-    || assets.find((item) => /\.apk$/i.test(item.name || ''));
-  if (!apk || !apk.browser_download_url) return null;
-  const version = versionFromApkUrl(apk.name)
+  const asset = pickReleaseAsset(release.assets);
+  if (!asset || !asset.browser_download_url) return null;
+  const version = versionFromReleaseName(asset.name)
     || String(release.tag_name || '').replace(/^v/i, '').trim();
   if (!version) return null;
-  return { version, downloadUrl: apk.browser_download_url, repo };
+  return {
+    version,
+    downloadUrl: asset.browser_download_url,
+    fileName: asset.name || '',
+    repo: UPDATE_REPO,
+  };
 }
 
-async function resolveUpdateTarget(raw) {
-  const value = String(raw || '').trim();
-  if (!value) return null;
-  if (isDirectApkUrl(value)) {
-    const version = versionFromApkUrl(value);
-    if (!version) return null;
-    return { version, downloadUrl: value };
+function showMandatoryUpdate(target) {
+  let overlay = document.getElementById('update-gate');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'update-gate';
+    overlay.className = 'update-gate';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    document.body.appendChild(overlay);
   }
-  const repo = parseGithubRepo(value);
-  if (!repo) return null;
-  return resolveUpdateFromGithub(repo);
+  document.body.classList.add('update-locked');
+  overlay.innerHTML = `
+    <section class="update-gate-card">
+      <h1>Mise à jour obligatoire</h1>
+      <p>La version <strong>${esc(target.version)}</strong> est disponible.</p>
+      <p class="meta">Version installée : ${esc(APP_VERSION)}</p>
+      <p>Téléchargez et installez cette version pour continuer. L’application reste bloquée tant que la mise à jour n’est pas installée.</p>
+      <button type="button" class="btn-sell btn-block" data-update-download>Télécharger ${esc(target.fileName || 'la mise à jour')}</button>
+      <p class="help" data-update-hint hidden>Téléchargement lancé. Installez le fichier puis rouvrez Tickets.</p>
+    </section>
+  `;
+  const button = overlay.querySelector('[data-update-download]');
+  const hint = overlay.querySelector('[data-update-hint]');
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    try {
+      await openExternal(target.downloadUrl);
+      if (hint) hint.hidden = false;
+    } catch (error) {
+      showToast(error.message || 'Téléchargement impossible.', 'err');
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+function clearMandatoryUpdate() {
+  const overlay = document.getElementById('update-gate');
+  if (overlay) overlay.remove();
+  document.body.classList.remove('update-locked');
+  enforceAppUpdate.locked = false;
+}
+
+async function enforceAppUpdate() {
+  let target = null;
+  try {
+    target = await resolveLatestReleaseUpdate();
+  } catch {
+    return Boolean(enforceAppUpdate.locked);
+  }
+  if (!target || !target.version || !target.downloadUrl || !versionIsNewer(target.version, APP_VERSION)) {
+    clearMandatoryUpdate();
+    return false;
+  }
+  enforceAppUpdate.locked = true;
+  showMandatoryUpdate(target);
+  return true;
+}
+
+async function checkForUpdate() {
+  return enforceAppUpdate();
+}
+
+if (!window.__opusUpdateWatchBound) {
+  window.__opusUpdateWatchBound = true;
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') enforceAppUpdate();
+  });
 }
 
 function readCurrency() {
@@ -396,26 +454,6 @@ async function openExternal(url) {
     return;
   }
   window.open(url, '_blank');
-}
-
-async function checkForUpdate() {
-  const configured = readUpdateUrl();
-  if (!configured || checkForUpdate.done) return;
-  let target = null;
-  try {
-    target = await resolveUpdateTarget(configured);
-  } catch {
-    return;
-  }
-  if (!target || !target.version || !target.downloadUrl) return;
-  if (!versionIsNewer(target.version, APP_VERSION)) return;
-  checkForUpdate.done = true;
-  const agreed = await showConfirm({
-    title: 'Mise à jour disponible',
-    text: `La version ${target.version} est prête.\nVersion installée : ${APP_VERSION}.`,
-    confirmLabel: 'Télécharger',
-  });
-  if (agreed) await openExternal(target.downloadUrl);
 }
 
 function showQr(code, url) {

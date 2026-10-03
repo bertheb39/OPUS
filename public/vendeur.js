@@ -155,7 +155,7 @@ function renderList() {
       <section class="card">
         <h2>Retrouver un ticket</h2>
         <form data-form="verifier" class="field-row">
-          <input id="verify-code" name="code" required autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Code" aria-label="Code">
+          <input id="verify-code" name="code" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="text" placeholder="Code" aria-label="Code">
           <button type="submit" ${state.busy ? 'disabled' : ''}>OK</button>
         </form>
       </section>
@@ -673,6 +673,7 @@ async function idleLogout() {
 
 async function boot() {
   watchIdle(idleLogout);
+  if (await enforceAppUpdate()) return;
   render();
   try {
     if (activityExpired()) {
@@ -696,7 +697,6 @@ async function boot() {
     state.busy = false;
   }
   render({ resetScroll: true });
-  setTimeout(() => { checkForUpdate(); }, 1500);
 }
 
 boot();
