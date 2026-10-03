@@ -27,8 +27,10 @@ final class RouterOsClient {
     ) throws IOException {
         Socket socket = new Socket();
         try {
-            socket.connect(new InetSocketAddress(host, port), timeoutMs);
-            socket.setSoTimeout(timeoutMs);
+            // Connexion : échouer vite si l’hôte est mort ; lecture : budget complet.
+            int connectTimeout = Math.min(Math.max(timeoutMs, 1000), 8000);
+            socket.connect(new InetSocketAddress(host, port), connectTimeout);
+            socket.setSoTimeout(Math.max(timeoutMs, 1000));
             socket.setTcpNoDelay(true);
             OutputStream out = socket.getOutputStream();
             InputStream in = socket.getInputStream();

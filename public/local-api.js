@@ -191,6 +191,11 @@ function formatSaleComment({ code, name, date = new Date() }) {
   return `vc-${code}-${value('day')}.${value('month')}.${value('year')}-${name}`;
 }
 
+/** Nettoyage si une ancienne version a préfixé AP> (l’app ne modifie plus les commentaires). */
+function stripAppCommentMark(comment) {
+  return String(comment || '').trim().replace(/^AP>/i, '');
+}
+
 function parseSaleScriptName(name) {
   const raw = String(name || '');
   let parts = raw.split('-|-');
@@ -229,7 +234,7 @@ function scriptConnectedAt(entry) {
 }
 
 function resellerNameFromComment(comment) {
-  const text = String(comment || '').trim();
+  const text = stripAppCommentMark(comment);
   if (!text) return '';
   const shaped = text.match(/^vc-[^-]+-\d{2}\.\d{2}\.\d{2}-(.+)$/i);
   if (shaped) return String(shaped[1] || '').trim();
@@ -382,6 +387,7 @@ function recettesReport(sales, resellers, routers = []) {
         resellerShare: 0,
         networkShare: 0,
         missingRate: 0,
+        profiles: new Map(),
       });
     }
     const resellerRow = byReseller.get(resellerId);
@@ -397,6 +403,22 @@ function recettesReport(sales, resellers, routers = []) {
       resellerRow.networkShare += share.networkShare;
       resellerShare += share.resellerShare;
       networkShare += share.networkShare;
+    }
+    if (!resellerRow.profiles.has(profile)) {
+      resellerRow.profiles.set(profile, {
+        profile,
+        count: 0,
+        amount: 0,
+        resellerShare: 0,
+        networkShare: 0,
+      });
+    }
+    const resellerProfile = resellerRow.profiles.get(profile);
+    resellerProfile.count += 1;
+    resellerProfile.amount += amount;
+    if (share.rate != null) {
+      resellerProfile.resellerShare += share.resellerShare;
+      resellerProfile.networkShare += share.networkShare;
     }
 
     if (!byProfile.has(profile)) {
@@ -420,9 +442,16 @@ function recettesReport(sales, resellers, routers = []) {
     }
   }
 
-  const resellersList = [...byReseller.values()].sort((a, b) => (
-    b.amount - a.amount || a.name.localeCompare(b.name, 'fr')
-  ));
+  const resellersList = [...byReseller.values()]
+    .map((row) => ({
+      ...row,
+      profiles: [...row.profiles.values()].sort((a, b) => (
+        b.amount - a.amount || a.profile.localeCompare(b.profile, 'fr')
+      )),
+    }))
+    .sort((a, b) => (
+      b.amount - a.amount || a.name.localeCompare(b.name, 'fr')
+    ));
   const profilesList = [...byProfile.values()].sort((a, b) => (
     b.amount - a.amount || a.profile.localeCompare(b.profile, 'fr')
   ));
@@ -445,7 +474,7 @@ function resellerSaleLabels(reseller) {
 }
 
 function resellerMatchesComment(reseller, comment, label = '') {
-  const text = commentKey(comment);
+  const text = commentKey(stripAppCommentMark(comment));
   const tip = commentKey(label || resellerNameFromComment(comment));
   return resellerSaleLabels(reseller).some((name) => {
     const key = commentKey(name);
@@ -570,9 +599,11 @@ function previousMonthKey(date = new Date()) {
 }
 
 const scriptListCache = new Map();
-const SCRIPT_LIST_TTL_MS = 90000;
+const SCRIPT_LIST_TTL_MS = 180000;
 const syncSalesCache = new Map();
-const SYNC_SALES_TTL_MS = 60000;
+const SYNC_SALES_TTL_MS = 120000;
+const assignedSyncCache = new Map();
+const ASSIGNED_SYNC_TTL_MS = 120000;
 let salesPurgeClean = false;
 
 function scriptListCacheKey(router, owners) {
@@ -702,7 +733,7 @@ function transactionDone(tx) {
 function openDatabase() {
   if (!openDatabase.promise) {
     openDatabase.promise = new Promise((resolve, reject) => {
-      const request = indexedDB.open('opus', 2);
+      const request = indexedDB.open('opus', 3);
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains('admins')) {
@@ -728,6 +759,10 @@ function openDatabase() {
         if (!db.objectStoreNames.contains('assigned')) {
           db.createObjectStore('assigned', { keyPath: 'id' });
         }
+        // Mémoire des remises faites via « Vendre » (AP), même après import du script.
+        if (!db.objectStoreNames.contains('app_marks')) {
+          db.createObjectStore('app_marks', { keyPath: 'id' });
+        }
       };
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
@@ -738,11 +773,13 @@ function openDatabase() {
 
 async function getAll(storeName) {
   const db = await openDatabase();
+  if (!db.objectStoreNames.contains(storeName)) return [];
   return requestToPromise(db.transaction(storeName, 'readonly').objectStore(storeName).getAll());
 }
 
 async function getOne(storeName, key) {
   const db = await openDatabase();
+  if (!db.objectStoreNames.contains(storeName)) return undefined;
   return requestToPromise(db.transaction(storeName, 'readonly').objectStore(storeName).get(key));
 }
 
@@ -767,7 +804,7 @@ async function deleteOne(storeName, key) {
   await transactionDone(tx);
 }
 
-const backupStores = ['admins', 'routers', 'profiles', 'resellers', 'stock', 'sales', 'assigned'];
+const backupStores = ['admins', 'routers', 'profiles', 'resellers', 'stock', 'sales', 'assigned', 'app_marks'];
 
 async function replaceDatabase(snapshot) {
   const db = await openDatabase();
@@ -775,7 +812,7 @@ async function replaceDatabase(snapshot) {
   backupStores.forEach((name) => {
     const store = tx.objectStore(name);
     store.clear();
-    snapshot[name].forEach((row) => {
+    (Array.isArray(snapshot[name]) ? snapshot[name] : []).forEach((row) => {
       if (row && typeof row === 'object') store.put(row);
     });
   });
@@ -793,11 +830,15 @@ async function importSnapshot(snapshot) {
   if (!snapshot || snapshot.opus !== 1 || !Array.isArray(snapshot.admins) || snapshot.admins.length === 0) {
     throw new Error('Cette copie est inutilisable.');
   }
-  const required = backupStores.filter((name) => name !== 'assigned');
+  const required = backupStores.filter((name) => name !== 'assigned' && name !== 'app_marks');
   if (!required.every((name) => Array.isArray(snapshot[name]))) {
     throw new Error('Cette copie est inutilisable.');
   }
-  await replaceDatabase({ ...snapshot, assigned: Array.isArray(snapshot.assigned) ? snapshot.assigned : [] });
+  await replaceDatabase({
+    ...snapshot,
+    assigned: Array.isArray(snapshot.assigned) ? snapshot.assigned : [],
+    app_marks: Array.isArray(snapshot.app_marks) ? snapshot.app_marks : [],
+  });
   const currency = String(snapshot.currency || '');
   if (['XOF', 'CDF', 'EUR', 'USD'].includes(currency)) localStorage.setItem('opus.currency', currency);
   writeSession({ type: 'admin', id: snapshot.admins[0].id });
@@ -957,6 +998,17 @@ async function buildResellerInvite(resellerId) {
       channel: item.channel || null,
     }));
 
+  const appMarks = (await getAll('app_marks'))
+    .filter((item) => Number(item.reseller_id) === Number(reseller.id) || !item.reseller_id)
+    .filter((item) => Number(item.router_id) === Number(router.id))
+    .map((item) => ({
+      id: item.id,
+      router_id: item.router_id,
+      code: item.code,
+      reseller_id: Number(reseller.id),
+      at: item.at || new Date().toISOString(),
+    }));
+
   // Compte revendeur + routeur : copie intégrale des champs connus (évite d’oublier un attribut).
   const pack = {
     opusInvite: 1,
@@ -974,6 +1026,7 @@ async function buildResellerInvite(resellerId) {
     profiles,
     stock,
     assigned,
+    app_marks: appMarks,
     // Volontairement absents du code WhatsApp :
     // - admins / autres revendeurs (sécurité)
     // - sales (historique) : trop volumineux ; resynchronisé depuis le routeur (scripts HAP)
@@ -1066,6 +1119,23 @@ async function importResellerInvite(token) {
       assigned_at: row.assigned_at || new Date().toISOString(),
       handed_at: row.handed_at || undefined,
       channel: row.channel || undefined,
+    });
+    if (row.handed_at || row.channel === 'AP') {
+      await rememberAppSale(Number(row.router_id) || routerId, row.name, resellerId);
+    }
+  }
+  const oldMarks = (await getAll('app_marks')).filter((item) => (
+    Number(item.reseller_id) === resellerId || Number(item.router_id) === routerId
+  ));
+  for (const row of oldMarks) await deleteOne('app_marks', row.id);
+  for (const row of pack.app_marks || []) {
+    if (!row || typeof row !== 'object' || !row.code) continue;
+    await putOne('app_marks', {
+      id: row.id || appMarkId(Number(row.router_id) || routerId, row.code),
+      router_id: Number(row.router_id) || routerId,
+      code: String(row.code).trim(),
+      reseller_id: resellerId,
+      at: row.at || new Date().toISOString(),
     });
   }
   const currency = String(pack.currency || '');
@@ -1322,6 +1392,15 @@ async function routerRunOnce(router, commands, timeoutMs) {
   return payload.results || [];
 }
 
+function routerAttemptBudget(index, hostCount, fullTimeout) {
+  if (index >= hostCount - 1) return fullTimeout;
+  // Lectures légères : bascule rapide vers l’autre adresse.
+  // Lectures lourdes (dump tickets/scripts) : laisser le temps au 1er hôte,
+  // sinon un ping OK + print long tombe en « Le routeur ne répond pas ».
+  if (fullTimeout <= 10000) return Math.min(fullTimeout, 2500);
+  return Math.min(fullTimeout, Math.max(12000, Math.floor(fullTimeout * 0.55)));
+}
+
 async function routerRun(router, commands, timeoutMs) {
   const hosts = routerHosts(router);
   if (!hosts.length) {
@@ -1332,8 +1411,7 @@ async function routerRun(router, commands, timeoutMs) {
   const fullTimeout = timeoutMs || 15000;
   const attempts = [];
   for (let index = 0; index < hosts.length; index += 1) {
-    // En multi-adresses (local + VPN), ne pas rester longtemps bloqué sur la première.
-    const budget = index < hosts.length - 1 ? Math.min(fullTimeout, 2500) : fullTimeout;
+    const budget = routerAttemptBudget(index, hosts.length, fullTimeout);
     try {
       const result = await routerRunOnce({ ...router, host: hosts[index] }, commands, budget);
       writeLastGoodHost(router.id, hosts[index]);
@@ -1377,10 +1455,12 @@ async function hotspotUserExists(router, name) {
 }
 
 async function listHotspotUsersByComment(router, name) {
+  // Dump complet nécessaire pour NOM et PREFIXE-NOM. Budget long :
+  // un print de milliers d’users dépasse souvent 20 s (surtout via VPN).
   const results = await routerRun(router, [[
     '/ip/hotspot/user/print',
     '=.proplist=name,password,profile,comment,uptime,bytes-in,bytes-out',
-  ]], 20000);
+  ]], 60000);
   const rows = results[0]?.rows || [];
   return rows.filter((row) => row.name && commentMatchesName(row.comment, name));
 }
@@ -1487,7 +1567,7 @@ function commentKey(value) {
 }
 
 function commentMatchesName(comment, name) {
-  const text = commentKey(comment);
+  const text = commentKey(stripAppCommentMark(comment));
   const wanted = commentKey(name);
   if (!text || !wanted) return false;
   return text === wanted || text.endsWith(`-${wanted}`);
@@ -1540,6 +1620,10 @@ function ticketConsumed(row) {
  * - Sinon : ajoute les nouveaux tickets des mêmes commentaires déjà attribués.
  */
 async function syncResellerAssignedFromRouter(reseller) {
+  const resellerId = Number(reseller && reseller.id) || 0;
+  const cached = assignedSyncCache.get(resellerId);
+  if (cached && cached.expires > Date.now()) return cached.result || { added: 0 };
+
   const baseRouter = await getOne('routers', Number(reseller.router_id));
   if (!baseRouter) return { added: 0 };
   const router = routerForReseller(baseRouter, reseller) || baseRouter;
@@ -1582,7 +1666,9 @@ async function syncResellerAssignedFromRouter(reseller) {
       if (key) knownComments.add(key);
     }
   }
-  return { added };
+  const result = { added };
+  assignedSyncCache.set(resellerId, { result, expires: Date.now() + ASSIGNED_SYNC_TTL_MS });
+  return result;
 }
 
 async function readTicketUsage(router, codes) {
@@ -1626,14 +1712,134 @@ function saleRecord(sale, resellers, routers) {
     price: sale.price,
     validity: sale.validity,
     limitUptime: sale.limit_uptime,
-    comment: sale.comment || '',
-    source: sale.source === 'HAP' ? 'HAP' : 'AP',
+    comment: stripAppCommentMark(sale.comment || ''),
+    source: sale.source === 'AP' ? 'AP' : 'HAP',
     loginUrl: router ? hotspotLoginUrl(router.host, sale.code, sale.password) : sale.code,
   };
 }
 
 function saleSourceFromAssigned(ticket) {
   return ticket.handed_at || ticket.channel === 'AP' ? 'AP' : 'HAP';
+}
+
+function appMarkId(routerId, code) {
+  return `${Number(routerId)}:${String(code || '').trim()}`;
+}
+
+function sameTicketCode(a, b) {
+  return String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+}
+
+/** Remise / vente faite dans l’app (écran Vendre) → badge AP durable. */
+async function rememberAppSale(routerId, code, resellerId = 0) {
+  const trimmed = String(code || '').trim();
+  if (!trimmed || !routerId) return;
+  try {
+    await putOne('app_marks', {
+      id: appMarkId(routerId, trimmed),
+      router_id: Number(routerId),
+      code: trimmed,
+      reseller_id: Number(resellerId) || 0,
+      at: new Date().toISOString(),
+    });
+  } catch {
+    // Store indisponible : on met quand même à jour les ventes locales.
+  }
+  await upgradeSalesSourceToApp(routerId, trimmed);
+}
+
+async function forgetAppSale(routerId, code) {
+  const trimmed = String(code || '').trim();
+  if (!trimmed || !routerId) return;
+  try {
+    await deleteOne('app_marks', appMarkId(routerId, trimmed));
+  } catch {
+    // ignore
+  }
+}
+
+async function upgradeSalesSourceToApp(routerId, code) {
+  const sales = await getAll('sales');
+  for (const sale of sales) {
+    if (Number(sale.router_id) !== Number(routerId)) continue;
+    if (!sameTicketCode(sale.code, code)) continue;
+    if (sale.source === 'AP') continue;
+    sale.source = 'AP';
+    await putOne('sales', sale);
+  }
+}
+
+function saleSourceFromEvidence(held, mark) {
+  if (mark) return 'AP';
+  return saleSourceFromAssigned(held || {});
+}
+
+async function rematchAppSaleSources() {
+  return rematchAppSaleSourcesFor(0);
+}
+
+/**
+ * Ne fait qu’UPGRADER HAP → AP s’il existe une preuve locale.
+ * Ne descend jamais AP → HAP (évite d’effacer une source correcte).
+ */
+async function repairSaleSourcesFromEvidence(resellerId = 0) {
+  return rematchAppSaleSourcesFor(resellerId);
+}
+
+async function rematchAppSaleSourcesFor(resellerId = 0) {
+  const [sales, marks, assigned] = await Promise.all([
+    getAll('sales'),
+    getAll('app_marks'),
+    getAll('assigned'),
+  ]);
+  const apCodes = new Set();
+  marks.forEach((mark) => {
+    if (mark && mark.router_id != null && mark.code) {
+      apCodes.add(`${Number(mark.router_id)}:${String(mark.code).trim().toLowerCase()}`);
+    }
+  });
+  assigned.forEach((item) => {
+    if (!item || item.router_id == null || !item.name) return;
+    if (!(item.handed_at || item.channel === 'AP')) return;
+    apCodes.add(`${Number(item.router_id)}:${String(item.name).trim().toLowerCase()}`);
+  });
+  let updated = 0;
+  for (const sale of sales) {
+    if (!sale || sale.source === 'AP') continue;
+    if (resellerId && Number(sale.reseller_id) !== Number(resellerId)) continue;
+    const key = `${Number(sale.router_id)}:${String(sale.code || '').trim().toLowerCase()}`;
+    if (!apCodes.has(key)) continue;
+    sale.source = 'AP';
+    await putOne('sales', sale);
+    updated += 1;
+  }
+  return updated;
+}
+
+/** Une seule ligne par code (évite les doublons sa6hiau5 / 1vf22kck). */
+async function dedupeSalesForRouter(routerId) {
+  const sales = await getAll('sales');
+  const best = new Map();
+  const drop = [];
+  for (const sale of sales) {
+    if (routerId && Number(sale.router_id) !== Number(routerId)) continue;
+    const key = `${Number(sale.router_id)}:${String(sale.code || '').trim().toLowerCase()}`;
+    const prev = best.get(key);
+    if (!prev) {
+      best.set(key, sale);
+      continue;
+    }
+    const preferSale = (sale.source === 'AP' && prev.source !== 'AP')
+      || (sale.source === prev.source && Number(sale.id) < Number(prev.id));
+    if (preferSale) {
+      drop.push(prev);
+      best.set(key, sale);
+    } else {
+      drop.push(sale);
+    }
+  }
+  for (const sale of drop) await deleteOne('sales', sale.id);
+  return drop.length;
 }
 
 async function saleExistsForCode(routerId, code) {
@@ -1672,7 +1878,7 @@ function ticketResponse(router, ticket, profile, whenIso) {
     price: profile.price,
     validity: profile.validity,
     limitUptime: profile.limit_uptime,
-    comment: ticket.comment || '',
+    comment: stripAppCommentMark(ticket.comment || ''),
     loginUrl: host ? hotspotLoginUrl(host, ticket.name, ticket.password) : ticket.name,
     when: formatDateTime(whenIso),
     pending: true,
@@ -1690,21 +1896,28 @@ async function syncHapSales({ resellerId = 0, routerId = 0, from = '', to = '', 
   }
 
   const runPromise = (async () => {
-    const [allRouters, resellers, sales, profiles, assigned] = await Promise.all([
+    const [allRouters, resellers, sales, profiles, assigned, appMarks] = await Promise.all([
       getAll('routers'),
       getAll('resellers'),
       getAll('sales'),
       getAll('profiles'),
       getAll('assigned'),
+      getAll('app_marks'),
     ]);
     const selected = allRouters.filter((router) => !routerId || Number(router.id) === Number(routerId));
     if (!selected.length) {
       return { created: 0, removed: 0, read: 0, unmatched: 0, warning: 'Aucun routeur enregistré.' };
     }
     await rematchOrphanScriptSales();
+    await rematchAppSaleSourcesFor(resellerId || 0);
     const owners = scriptOwnersBetween(windowFrom, windowTo);
-    const sold = new Set(sales.map((sale) => `${sale.router_id}:${sale.code}`));
+    const sold = new Set(sales.map((sale) => `${sale.router_id}:${String(sale.code || '').trim().toLowerCase()}`));
     const scriptKeys = new Set(sales.map((sale) => sale.script_key).filter(Boolean));
+    const marksByCode = new Map();
+    appMarks.forEach((mark) => {
+      if (!mark || mark.router_id == null || !mark.code) return;
+      marksByCode.set(`${Number(mark.router_id)}:${String(mark.code).trim().toLowerCase()}`, mark);
+    });
     let created = 0;
     let removed = 0;
     let read = 0;
@@ -1735,8 +1948,26 @@ async function syncHapSales({ resellerId = 0, routerId = 0, from = '', to = '', 
       }
       let createdHere = 0;
       for (const entry of entries) {
-        if (scriptKeys.has(entry.scriptName)) continue;
-        if (sold.has(`${baseRouter.id}:${entry.code}`)) continue;
+        const held = assigned.find((item) => (
+          Number(item.router_id) === Number(baseRouter.id) && sameTicketCode(item.name, entry.code)
+        ));
+        const mark = marksByCode.get(`${Number(baseRouter.id)}:${String(entry.code || '').trim().toLowerCase()}`);
+        const source = saleSourceFromEvidence(held, mark);
+
+        // Vente déjà importée : mettre à jour HAP → AP si remis via l’app entre-temps.
+        // On garde app_marks (preuve durable) ; on retire seulement la fiche assigned consommée.
+        if (scriptKeys.has(entry.scriptName) || sold.has(`${baseRouter.id}:${String(entry.code).trim().toLowerCase()}`)) {
+          if (source === 'AP') {
+            await upgradeSalesSourceToApp(baseRouter.id, entry.code);
+            if (held) {
+              await deleteOne('assigned', held.id);
+              const idx = assigned.indexOf(held);
+              if (idx >= 0) assigned.splice(idx, 1);
+            }
+          }
+          continue;
+        }
+
         const owner = matchResellerForScript(entry, resellers, baseRouter.id);
         const label = entry.resellerLabel || resellerNameFromComment(entry.comment);
         if (resellerId) {
@@ -1750,9 +1981,6 @@ async function syncHapSales({ resellerId = 0, routerId = 0, from = '', to = '', 
           if (label) missingNames.add(label);
         }
         const profile = matchProfileForScript(entry, profiles, baseRouter.id);
-        const held = assigned.find((item) => (
-          Number(item.router_id) === Number(baseRouter.id) && item.name === entry.code
-        ));
         const connectedAt = scriptConnectedAt(entry);
         await putOne('sales', {
           reseller_id: owner ? owner.id : 0,
@@ -1766,15 +1994,20 @@ async function syncHapSales({ resellerId = 0, routerId = 0, from = '', to = '', 
           validity: entry.validity || (profile ? profile.validity : ''),
           limit_uptime: profile ? (profile.limit_uptime || '') : (entry.uptimeHint || ''),
           comment: entry.comment,
-          source: saleSourceFromAssigned(held || {}),
+          source,
           sale_date: entry.date,
           created_at: connectedAt.toISOString(),
           script_key: entry.scriptName,
           connected_at: `${entry.date} ${entry.time || ''}`.trim(),
         });
-        sold.add(`${baseRouter.id}:${entry.code}`);
+        sold.add(`${baseRouter.id}:${String(entry.code).trim().toLowerCase()}`);
         scriptKeys.add(entry.scriptName);
-        if (held) await deleteOne('assigned', held.id);
+        if (held) {
+          await deleteOne('assigned', held.id);
+          const idx = assigned.indexOf(held);
+          if (idx >= 0) assigned.splice(idx, 1);
+        }
+        // app_marks conservée : preuve AP même après import (pas d’écriture MikroTik).
         created += 1;
         createdHere += 1;
       }
@@ -1786,7 +2019,9 @@ async function syncHapSales({ resellerId = 0, routerId = 0, from = '', to = '', 
         sales,
       );
       removed += removedHere;
-      if (createdHere || removedHere) invalidateScriptListCache(baseRouter.id);
+      const deduped = await dedupeSalesForRouter(baseRouter.id);
+      removed += deduped;
+      if (createdHere || removedHere || deduped) invalidateScriptListCache(baseRouter.id);
     }
     if ((created || removed) && typeof scheduleDriveBackup === 'function') scheduleDriveBackup();
     // Seulement les vraies erreurs réseau — pas de messages « Import OK » / listes de noms.
@@ -1957,8 +2192,8 @@ function reportWindow(query, lockedResellerId) {
   const today = localDateISO(new Date());
   const month = currentMonthKey();
   const span = monthRange(month);
-  // Par défaut : mois en cours (1 → aujourd’hui), pas seulement aujourd’hui.
-  let from = query.get('from') || span.start;
+  // Par défaut : aujourd’hui (Du / Au). Le sync mois reste séparé pour les cartes « Ce mois ».
+  let from = query.get('from') || today;
   let to = query.get('to') || today;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) return null;
   if (from > to) {
@@ -1977,16 +2212,28 @@ function reportWindow(query, lockedResellerId) {
   };
 }
 
+function dedupeSaleRows(rows) {
+  const seen = new Set();
+  const out = [];
+  for (const sale of rows) {
+    const key = `${Number(sale.router_id)}:${String(sale.code || '').trim().toLowerCase()}:${sale.connected_at || sale.sale_date || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(sale);
+  }
+  return out;
+}
+
 async function reportRows(range) {
   const sales = (await getAll('sales')).filter((sale) => sale.script_key);
   const inScope = (sale) => (
     (!range.resellerId || sale.reseller_id === range.resellerId)
     && (!range.routerId || sale.router_id === range.routerId)
   );
-  const scoped = sales.filter(inScope);
+  const scoped = dedupeSaleRows(sales.filter(inScope));
   const period = scoped
     .filter((sale) => sale.sale_date >= range.from && sale.sale_date <= range.to)
-    .sort((a, b) => b.created_at.localeCompare(a.created_at));
+    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
   return {
     todayRows: scoped.filter((sale) => sale.sale_date === range.today),
     monthRows: scoped.filter((sale) => sale.sale_date >= range.monthFrom && sale.sale_date < range.monthNext),
@@ -2231,6 +2478,31 @@ async function handle(method, url, body) {
     return ok({ ok: true });
   }
 
+  // Réinitialisation admin via mot de passe d’usine — accessible sans session.
+  if (method === 'POST' && path === '/api/admin/password/reset') {
+    if (tooManyAttempts('admin-reset')) {
+      return fail(429, 'Trop de tentatives. Réessayez dans une minute.');
+    }
+    const factoryPassword = String(body.factoryPassword || body.password || '');
+    const admins = await getAll('admins');
+    if (!admins.length) {
+      markAttempt('admin-reset', false);
+      return fail(400, 'Aucun compte admin sur cet appareil.');
+    }
+    if (!(await ownerPasswordMatches(factoryPassword))) {
+      markAttempt('admin-reset', false);
+      return fail(401, 'Mot de passe d’usine incorrect.');
+    }
+    const factoryHash = await hashPassword(factoryPassword);
+    for (const row of admins) {
+      row.password_hash = factoryHash;
+      await putOne('admins', row);
+    }
+    markAttempt('admin-reset', true);
+    writeSession(null);
+    return ok({ ok: true, reset: true });
+  }
+
   const admin = requireSession('admin');
   const resellerSession = requireSession('reseller');
 
@@ -2240,6 +2512,29 @@ async function handle(method, url, body) {
   if (method === 'GET' && path === '/api/admin/me') {
     const row = await getOne('admins', admin.id);
     return ok({ username: row ? row.username : '', timeZone });
+  }
+
+  if (method === 'POST' && path === '/api/admin/password') {
+    const current = String(body.currentPassword || body.current || '');
+    const next = String(body.password || body.newPassword || '');
+    const confirm = String(body.confirm || body.confirmPassword || '');
+    const row = await getOne('admins', admin.id);
+    if (!row) return fail(404, 'Compte introuvable.');
+    if (!(await verifyPassword(current, row.password_hash))) {
+      return fail(401, 'Mot de passe actuel incorrect.');
+    }
+    const passwordError = validatePassword(next, 8);
+    if (passwordError) return fail(400, passwordError);
+    if (next !== confirm) return fail(400, 'Les deux nouveaux mots de passe ne correspondent pas.');
+    if (await verifyPassword(next, row.password_hash)) {
+      return fail(400, 'Choisissez un mot de passe différent de l’actuel.');
+    }
+    if (await passwordAlreadyUsed(next)) {
+      return fail(400, 'Ce mot de passe est déjà utilisé par un revendeur.');
+    }
+    row.password_hash = await hashPassword(next);
+    await putOne('admins', row);
+    return ok({ ok: true });
   }
 
   if (method === 'GET' && path === '/api/admin/backup') {
@@ -2528,7 +2823,9 @@ async function handle(method, url, body) {
     const assigned = await getAll('assigned');
     const book = await exactCommentOwners(router.id);
     const sold = new Set(sales.filter((sale) => sale.router_id === router.id).map((sale) => sale.code));
-    const taken = new Set(assigned.filter((item) => item.router_id === router.id).map((item) => item.name));
+    const onRouter = assigned.filter((item) => Number(item.router_id) === Number(router.id));
+    const taken = new Set(onRouter.map((item) => item.name));
+    const ticketOwner = new Map(onRouter.map((item) => [item.name, Number(item.reseller_id)]));
     let rows = [];
     try {
       rows = await listHotspotUsersByComment(router, commentName);
@@ -2546,10 +2843,18 @@ async function handle(method, url, body) {
     groups.forEach((group) => {
       const profiles = [...new Set(group.tickets.map((row) => row.profile).filter(Boolean))];
       profiles.sort((a, b) => a.localeCompare(b, 'fr'));
-      const others = otherOwnersOf(book, group.comment, reseller.id);
+      const ownerIds = new Set();
+      const fromBook = book.owners.get(commentKey(group.comment));
+      if (fromBook) fromBook.forEach((id) => ownerIds.add(Number(id)));
       let count = 0;
       let used = 0;
+      let assignedCount = 0;
       group.tickets.forEach((row) => {
+        const ownerId = ticketOwner.get(row.name);
+        if (ownerId) {
+          ownerIds.add(Number(ownerId));
+          assignedCount += 1;
+        }
         if (sold.has(row.name) || taken.has(row.name)) {
           hidden += 1;
           return;
@@ -2560,13 +2865,22 @@ async function handle(method, url, body) {
         }
         count += 1;
       });
+      const me = Number(reseller.id);
+      const otherNames = [...ownerIds]
+        .filter((id) => Number(id) !== me)
+        .map((id) => book.names.get(Number(id)) || 'un revendeur')
+        .filter(Boolean);
+      const mine = ownerIds.has(me);
       lots.push({
         comment: group.comment,
         profiles,
         count,
         used,
-        blocked: others.length > 0,
-        owner: others.join(', '),
+        assignedCount,
+        mine,
+        blocked: otherNames.length > 0,
+        owner: otherNames.join(', '),
+        ownerMine: mine ? (reseller.hmp_name || 'vous') : '',
       });
     });
     lots.sort((a, b) => a.comment.localeCompare(b.comment, 'fr'));
@@ -2967,6 +3281,7 @@ async function handle(method, url, body) {
         channel: 'AP',
         profile_id: profile.id,
       });
+      await rememberAppSale(reseller.router_id, code, reseller.id);
       remisSaved = true;
     };
     try {
@@ -3075,6 +3390,7 @@ async function handle(method, url, body) {
     ticket.handed_at = handedAt;
     ticket.channel = ticket.channel || 'LOT';
     await putOne('assigned', ticket);
+    await rememberAppSale(reseller.router_id, ticket.name, reseller.id);
     return ok(ticketResponse(baseRouter, ticket, profile, handedAt));
   }
 
@@ -3124,6 +3440,7 @@ async function handle(method, url, body) {
     const handedAt = new Date().toISOString();
     ticket.handed_at = ticket.handed_at || handedAt;
     await putOne('assigned', ticket);
+    await rememberAppSale(reseller.router_id, ticket.name, reseller.id);
     return ok({
       status: 'ready',
       ...ticketResponse(baseRouter, ticket, profile, ticket.handed_at),
@@ -3172,11 +3489,13 @@ async function handle(method, url, body) {
         return fail(502, error.message || 'Impossible de retirer le ticket du routeur.');
       }
       await deleteOne('assigned', ticket.id);
+      await forgetAppSale(reseller.router_id, ticket.name);
       if (profileId) await restoreStock(reseller.id, profileId);
       return ok({ cancelled: true, channel: 'AP', code: ticket.name, stockRestored: Boolean(profileId) });
     }
     delete ticket.handed_at;
     await putOne('assigned', ticket);
+    await forgetAppSale(reseller.router_id, ticket.name);
     return ok({ cancelled: true, channel: 'LOT', code: ticket.name, stockRestored: false });
   }
 
@@ -3186,7 +3505,7 @@ async function handle(method, url, body) {
 function noteDataChange(method, url) {
   if (method === 'GET') return;
   const path = new URL(url, 'http://app.local').pathname;
-  if (['/api/admin/backup', '/api/admin/restore', '/api/logout', '/api/enter', '/api/invite/accept', '/api/setup', '/api/admin/login', '/api/vendeur/login'].includes(path)) return;
+  if (['/api/admin/backup', '/api/admin/restore', '/api/logout', '/api/enter', '/api/invite/accept', '/api/setup', '/api/admin/login', '/api/vendeur/login', '/api/admin/password/reset'].includes(path)) return;
   if (path.endsWith('/test') || path.endsWith('/usage') || path.endsWith('/actifs')) return;
   if (typeof scheduleDriveBackup === 'function') scheduleDriveBackup();
 }

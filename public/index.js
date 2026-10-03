@@ -44,9 +44,37 @@ function renderEnter(options = {}) {
         ${passwordField({ id: 'password', name: 'password', autocomplete: 'current-password', required: true })}
         <button class="btn-sell btn-block" type="submit" ${busy ? 'disabled' : ''}>Entrer</button>
       </form>
+      ${setup ? '' : `<button class="btn-quiet btn-block" type="button" data-action="reset-admin" ${busy ? 'disabled' : ''}>Mot de passe admin oublié</button>`}
       <button class="btn-quiet btn-block" type="button" data-action="welcome">Retour</button>
     </section>
   `;
+}
+
+async function resetAdminPasswordWithFactory() {
+  const factoryPassword = await showConfirm({
+    title: 'Réinitialiser le mot de passe admin ?',
+    text: 'Le mot de passe d’administration redeviendra le mot de passe d’usine. Les comptes revendeurs ne sont pas modifiés.',
+    passwordPrompt: 'Veuillez saisir le mot de passe d’usine pour réinitialiser',
+    confirmLabel: 'Réinitialiser',
+    danger: true,
+  });
+  if (factoryPassword == null) return;
+  busy = true;
+  renderEnter({ setup: false });
+  try {
+    await api('/api/admin/password/reset', {
+      method: 'POST',
+      body: { factoryPassword },
+    });
+    clearActivity();
+    clearOwner();
+    showToast('Mot de passe admin réinitialisé. Connectez-vous avec le mot de passe d’usine.', 'ok', 5000);
+  } catch (error) {
+    showToast(error.message || 'Réinitialisation impossible.', 'err', 4500);
+  } finally {
+    busy = false;
+    renderEnter({ setup: false });
+  }
 }
 
 function extractInviteToken(raw) {
@@ -91,6 +119,10 @@ app.addEventListener('click', async (event) => {
   }
   if (action === 'invite') {
     renderInvite();
+    return;
+  }
+  if (action === 'reset-admin') {
+    await resetAdminPasswordWithFactory();
     return;
   }
   if (action === 'nouveau') {

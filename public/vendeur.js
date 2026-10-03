@@ -10,7 +10,7 @@ const state = {
   report: null,
   salesFrom: '',
   salesTo: '',
-  periodKind: 'month',
+  periodKind: 'today',
   usage: {},
   usageWarning: '',
   actifs: null,
@@ -426,6 +426,7 @@ app.addEventListener('submit', async (event) => {
     state.salesTo = data.to;
     state.periodKind = '';
     await runBusyRender(render, () => loadSales(), {
+      busyLabel: 'Chargement du rapport…',
       before: () => { state.busy = true; },
       after: () => { state.busy = false; },
     });
@@ -453,6 +454,7 @@ app.addEventListener('submit', async (event) => {
       }
     }, {
       resetScroll: true,
+      busyLabel: 'Vérification du ticket…',
       before: () => { state.busy = true; },
       after: () => { state.busy = false; },
     });
@@ -460,6 +462,7 @@ app.addEventListener('submit', async (event) => {
   }
   if (form.dataset.form !== 'login') return;
   state.busy = true;
+  showAppBusy('Connexion…');
   render();
   try {
     await api('/api/vendeur/login', { method: 'POST', body: data });
@@ -473,6 +476,7 @@ app.addEventListener('submit', async (event) => {
     showToast(error.message, 'err');
   } finally {
     state.busy = false;
+    hideAppBusy();
     render({ resetScroll: true });
   }
 });
@@ -487,6 +491,7 @@ app.addEventListener('click', async (event) => {
     state.screen = 'list';
     await runBusyRender(render, () => loadForfaits().catch(() => {}), {
       resetScroll: true,
+      busyLabel: 'Chargement…',
       before: () => { state.busy = true; },
       after: () => { state.busy = false; },
     });
@@ -502,10 +507,14 @@ app.addEventListener('click', async (event) => {
     const loader = state.screen === 'history'
       ? () => loadSales()
       : (state.screen === 'actifs' ? () => loadActifs() : () => loadForfaits());
+    const busyLabel = state.screen === 'history'
+      ? 'Chargement du rapport…'
+      : (state.screen === 'actifs' ? 'Lecture des sessions…' : 'Chargement des forfaits…');
     await runBusyRender(render, async () => {
       try { await loader(); } catch (error) { showToast(error.message, 'err'); }
     }, {
       resetScroll: true,
+      busyLabel,
       before: () => { state.busy = true; },
       after: () => { state.busy = false; },
     });
@@ -536,6 +545,7 @@ app.addEventListener('click', async (event) => {
       }
     }, {
       resetScroll: true,
+      busyLabel: 'Remise du ticket…',
       before: () => { state.busy = true; },
       after: () => { state.busy = false; },
     });
@@ -565,6 +575,7 @@ app.addEventListener('click', async (event) => {
       }
     }, {
       resetScroll: true,
+      busyLabel: 'Remise du ticket…',
       before: () => { state.busy = true; },
       after: () => { state.busy = false; },
     });
@@ -581,6 +592,7 @@ app.addEventListener('click', async (event) => {
       state.salesTo = state.report.todayDate;
     }
     await runBusyRender(render, () => loadSales(), {
+      busyLabel: 'Chargement du rapport…',
       before: () => { state.busy = true; },
       after: () => { state.busy = false; },
     });
@@ -648,6 +660,7 @@ app.addEventListener('click', async (event) => {
       }
     }, {
       resetScroll: true,
+      busyLabel: 'Annulation de la remise…',
       before: () => { state.busy = true; },
       after: () => { state.busy = false; },
     });
@@ -685,6 +698,7 @@ async function boot() {
       return;
     }
     state.busy = true;
+    showAppBusy('Ouverture…');
     render();
     state.me = await api('/api/vendeur/me');
     state.authed = true;
@@ -695,6 +709,7 @@ async function boot() {
     state.authed = false;
   } finally {
     state.busy = false;
+    hideAppBusy();
   }
   render({ resetScroll: true });
 }

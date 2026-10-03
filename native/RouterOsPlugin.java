@@ -59,7 +59,8 @@ public class RouterOsPlugin extends Plugin {
                     parsed.add(words);
                 }
                 int timeout = call.getInt("timeout", 15000);
-                if (timeout < 1000 || timeout > 20000) timeout = 15000;
+                if (timeout < 1000) timeout = 1000;
+                if (timeout > 90000) timeout = 90000;
                 List<List<Map<String, String>>> results = RouterOsClient.run(host, port, username, password, parsed, timeout);
                 JSArray payload = new JSArray();
                 for (List<Map<String, String>> rows : results) {

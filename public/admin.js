@@ -13,7 +13,7 @@ const state = {
   resellerMonth: '',
   salesFrom: '',
   salesTo: '',
-  periodKind: 'month',
+  periodKind: 'today',
   salesRouterId: 0,
   salesResellerId: 0,
   actifsRouterId: 0,
@@ -23,6 +23,7 @@ const state = {
   usageWarning: '',
   sales: null,
   recettes: null,
+  recettesView: 'resellers',
   message: '',
   error: '',
   busy: false,
@@ -66,8 +67,38 @@ function renderLogin() {
         ${passwordField({ id: 'password', name: 'password', autocomplete: 'current-password', required: true })}
         <button class="btn-block" type="submit" ${state.busy ? 'disabled' : ''}>Entrer</button>
       </form>
+      <button class="btn-quiet btn-block" type="button" data-action="reset-admin" ${state.busy ? 'disabled' : ''}>Mot de passe oublié</button>
     </section>
   `;
+}
+
+async function resetAdminPasswordWithFactory() {
+  const factoryPassword = await showConfirm({
+    title: 'Réinitialiser le mot de passe admin ?',
+    text: 'Le mot de passe d’administration redeviendra le mot de passe d’usine. Les comptes revendeurs ne sont pas modifiés.',
+    passwordPrompt: 'Veuillez saisir le mot de passe d’usine pour réinitialiser',
+    confirmLabel: 'Réinitialiser',
+    danger: true,
+  });
+  if (factoryPassword == null) return;
+  state.busy = true;
+  showAppBusy('Réinitialisation…');
+  render();
+  try {
+    await api('/api/admin/password/reset', {
+      method: 'POST',
+      body: { factoryPassword },
+    });
+    state.authed = false;
+    clearActivity();
+    showToast('Mot de passe admin réinitialisé. Connectez-vous avec le mot de passe d’usine.', 'ok', 5000);
+  } catch (error) {
+    showToast(error.message || 'Réinitialisation impossible.', 'err', 4500);
+  } finally {
+    state.busy = false;
+    hideAppBusy();
+    render();
+  }
 }
 
 function reachMode() {
@@ -147,6 +178,7 @@ function renderRouters() {
         <button type="submit">Enregistrer</button>
       </form>
     </section>
+    ${renderAdminPassword()}
     ${renderCurrency()}
     ${renderBackup()}
     ${cards || '<p class="meta">Aucun routeur.</p>'}
@@ -301,10 +333,22 @@ function renderLot(reseller) {
   const rows = lots.map((item) => {
     const profiles = (item.profiles || []).join(', ') || '—';
     let detail = `${profiles} · ${item.count} ticket${item.count > 1 ? 's' : ''}`;
-    if (item.blocked) detail = `Déjà attribué à ${item.owner}`;
-    else if (!item.count && item.used) detail = `${profiles} · ${item.used} connecté${item.used > 1 ? 's' : ''}`;
-    else if (!item.count) detail = 'Déjà attribué';
-    else if (item.used) detail += ` · ${item.used} connecté${item.used > 1 ? 's' : ''}`;
+    if (item.blocked && item.owner) {
+      detail = `Déjà attribué à ${item.owner}`;
+    } else if (!item.count && item.mine && item.ownerMine) {
+      detail = `Déjà attribué à ${item.ownerMine}`;
+    } else if (!item.count && item.owner) {
+      detail = `Déjà attribué à ${item.owner}`;
+    } else if (!item.count && item.used) {
+      detail = `${profiles} · ${item.used} connecté${item.used > 1 ? 's' : ''}`;
+    } else if (!item.count) {
+      detail = 'Déjà attribué';
+    } else if (item.used) {
+      detail += ` · ${item.used} connecté${item.used > 1 ? 's' : ''}`;
+    }
+    if (item.mine && item.count > 0 && item.ownerMine) {
+      detail += ` · déjà chez ${item.ownerMine}`;
+    }
     if (item.blocked || !item.count) {
       return `<div class="lot-line"><span>${esc(item.comment)}</span><span class="meta">${esc(detail)}</span></div>`;
     }
@@ -430,6 +474,25 @@ function renderCurrency() {
         <select name="currency">${options}</select>
         <button type="submit">OK</button>
       </form>
+    </section>
+  `;
+}
+
+function renderAdminPassword() {
+  return `
+    <section class="card">
+      <h2>Mot de passe admin</h2>
+      <p class="meta">Changez le mot de passe utilisé pour ouvrir l’administration.</p>
+      <form data-form="admin-password" class="stack">
+        <label>Mot de passe actuel</label>
+        ${passwordField({ name: 'currentPassword', autocomplete: 'current-password', required: true })}
+        <label>Nouveau mot de passe</label>
+        ${passwordField({ name: 'password', autocomplete: 'new-password', required: true, minlength: 8 })}
+        <label>Confirmer</label>
+        ${passwordField({ name: 'confirm', autocomplete: 'new-password', required: true, minlength: 8 })}
+        <button type="submit">Enregistrer</button>
+      </form>
+      <button type="button" class="btn-quiet btn-block" data-action="reset-admin" style="margin-top:10px">Revenir au mot de passe d’usine</button>
     </section>
   `;
 }
@@ -565,6 +628,13 @@ function renderActifs() {
   `;
 }
 
+function pctLabel(part, total) {
+  const t = Number(total) || 0;
+  const p = Number(part) || 0;
+  if (!t) return '0 %';
+  return `${Math.round((p * 100) / t)} %`;
+}
+
 function renderRecettes() {
   const data = state.recettes;
   const kind = state.periodKind || (
@@ -582,39 +652,60 @@ function renderRecettes() {
   const periodLabel = period
     ? (period.from === period.to ? period.from : `${period.from} → ${period.to}`)
     : '';
-  const byReseller = (data?.byReseller || []).map((row) => `
-    <article class="sale-card">
-      <div class="sale-top">
-        <strong>${esc(row.name)}</strong>
-        <span class="badge badge-price">${row.rate == null ? 'taux ?' : `${esc(row.rate)} %`}</span>
+  const total = period ? Number(period.total) || 0 : 0;
+  const view = state.recettesView === 'profiles' ? 'profiles' : 'resellers';
+
+  const byReseller = (data?.byReseller || []).map((row) => {
+    const profiles = (row.profiles || []).map((item) => `
+      <div class="recettes-sub">
+        <span>${esc(item.profile)} · ${esc(item.count)} tkt</span>
+        <span>${esc(money(item.amount))}</span>
+        <span class="ok">${esc(money(item.resellerShare))}</span>
+        <span class="due">${esc(money(item.networkShare))}</span>
       </div>
-      <p class="meta">${esc(row.routerName || '—')} · ${esc(row.count)} ticket${row.count > 1 ? 's' : ''}</p>
-      <div class="report-line"><span>Ventes</span><strong>${esc(money(row.amount))}</strong></div>
-      <div class="report-line report-line-ok"><span>Part revendeur</span><strong>${esc(money(row.resellerShare))}</strong></div>
-      <div class="report-line report-line-due"><span>Part réseau</span><strong>${esc(money(row.networkShare))}</strong></div>
-      ${row.missingRate ? '<p class="meta">Taux manquant sur une partie des ventes.</p>' : ''}
-    </article>
-  `).join('');
+    `).join('');
+    return `
+      <article class="recettes-block">
+        <div class="recettes-head">
+          <div>
+            <strong>${esc(row.name)}</strong>
+            <p class="meta">${esc(row.routerName || '—')}${row.rate == null ? '' : ` · taux ${esc(row.rate)} %`} · ${esc(row.count)} ticket${row.count > 1 ? 's' : ''}</p>
+          </div>
+          <strong>${esc(money(row.amount))}</strong>
+        </div>
+        <div class="recettes-grid">
+          <span>Part revendeur</span><strong class="ok">${esc(money(row.resellerShare))}</strong>
+          <span>Part réseau</span><strong class="due">${esc(money(row.networkShare))}</strong>
+        </div>
+        ${profiles ? `
+          <div class="recettes-sub-head"><span>Forfait</span><span>Ventes</span><span>Revendeur</span><span>Réseau</span></div>
+          ${profiles}
+        ` : ''}
+        ${row.missingRate ? '<p class="meta">Taux manquant sur une partie des ventes.</p>' : ''}
+      </article>
+    `;
+  }).join('');
+
   const byProfile = (data?.byProfile || []).map((row) => `
-    <article class="sale-card">
-      <div class="sale-top">
-        <strong>${esc(row.profile)}</strong>
-        <span class="badge badge-price">${esc(row.count)} tkt</span>
+    <article class="recettes-block">
+      <div class="recettes-head">
+        <div>
+          <strong>${esc(row.profile)}</strong>
+          <p class="meta">${esc(row.count)} ticket${row.count > 1 ? 's' : ''} · ${esc(pctLabel(row.amount, total))} du CA</p>
+        </div>
+        <strong>${esc(money(row.amount))}</strong>
       </div>
-      <div class="report-line"><span>Ventes</span><strong>${esc(money(row.amount))}</strong></div>
-      <div class="report-line report-line-ok"><span>Part revendeurs</span><strong>${esc(money(row.resellerShare))}</strong></div>
-      <div class="report-line report-line-due"><span>Part réseau</span><strong>${esc(money(row.networkShare))}</strong></div>
+      <div class="recettes-grid">
+        <span>Parts revendeurs</span><strong class="ok">${esc(money(row.resellerShare))}</strong>
+        <span>Part réseau</span><strong class="due">${esc(money(row.networkShare))}</strong>
+      </div>
     </article>
   `).join('');
 
   return `
-    <div class="stat-grid">
-      ${statCard("Aujourd'hui", data ? data.today.count : null, data ? data.today.total : null, { period: 'today', selected: kind === 'today' })}
-      ${statCard('Ce mois', data ? data.month.count : null, data ? data.month.total : null, { period: 'month', selected: kind === 'month' })}
-    </div>
     <section class="card">
       <h2>Recettes</h2>
-      <p class="meta">Récapitulatif des parts revendeurs et réseau sur la période.</p>
+      <p class="meta">Synthèse des gains (scripts MikroTik) : total, parts revendeurs et part réseau.</p>
       <div class="presets">
         <button type="button" data-action="period" data-period="today" aria-selected="${kind === 'today' ? 'true' : 'false'}">Aujourd'hui</button>
         <button type="button" data-action="period" data-period="month" aria-selected="${kind === 'month' ? 'true' : 'false'}">Ce mois</button>
@@ -634,23 +725,40 @@ function renderRecettes() {
         <select name="routerId">${routerOptionsHtml}</select>
         <label>Revendeur</label>
         <select name="resellerId">${resellerOptions}</select>
-        <button type="submit">Afficher</button>
+        <button type="submit">Actualiser</button>
       </form>
-      ${period ? `
-        <div class="report-line"><span>Total ventes${periodLabel ? ` (${esc(periodLabel)})` : ''}<span class="report-tickets">${esc(period.count)} ticket${period.count === 1 ? '' : 's'}</span></span><strong>${esc(money(period.total))}</strong></div>
-        <div class="report-line report-line-ok"><span>Somme parts revendeurs</span><strong>${esc(money(period.resellerShare))}</strong></div>
-        <div class="report-line report-line-due"><span>Somme parts réseau</span><strong>${esc(money(period.networkShare))}</strong></div>
-        ${period.missingRate ? `<p class="meta">${esc(period.missingRate)} vente${period.missingRate > 1 ? 's' : ''} sans taux (${esc(money(period.missingAmount || 0))})</p>` : ''}
-      ` : '<p class="meta">Chargement des recettes…</p>'}
       ${data?.syncWarning ? `<p class="meta">${esc(data.syncWarning)}</p>` : ''}
     </section>
+
+    ${period ? `
+      <div class="recettes-summary">
+        <article class="recettes-kpi">
+          <span>Total ventes${periodLabel ? ` · ${esc(periodLabel)}` : ''}</span>
+          <strong>${esc(money(period.total))}</strong>
+          <em>${esc(period.count)} ticket${period.count === 1 ? '' : 's'}</em>
+        </article>
+        <article class="recettes-kpi recettes-kpi-ok">
+          <span>Parts revendeurs</span>
+          <strong>${esc(money(period.resellerShare))}</strong>
+          <em>${esc(pctLabel(period.resellerShare, period.total))}</em>
+        </article>
+        <article class="recettes-kpi recettes-kpi-due">
+          <span>Part réseau</span>
+          <strong>${esc(money(period.networkShare))}</strong>
+          <em>${esc(pctLabel(period.networkShare, period.total))}</em>
+        </article>
+      </div>
+      ${period.missingRate ? `<p class="meta">${esc(period.missingRate)} vente${period.missingRate > 1 ? 's' : ''} sans taux (${esc(money(period.missingAmount || 0))})</p>` : ''}
+    ` : '<section class="card"><p class="meta">Chargement des recettes…</p></section>'}
+
     <section class="card">
-      <h2>Par revendeur</h2>
-      ${byReseller || '<p class="meta">Aucune vente sur cette période.</p>'}
-    </section>
-    <section class="card">
-      <h2>Par forfait</h2>
-      ${byProfile || '<p class="meta">Aucune vente sur cette période.</p>'}
+      <div class="presets">
+        <button type="button" data-action="recettes-view" data-view="resellers" aria-selected="${view === 'resellers' ? 'true' : 'false'}">Par revendeur</button>
+        <button type="button" data-action="recettes-view" data-view="profiles" aria-selected="${view === 'profiles' ? 'true' : 'false'}">Par forfait</button>
+      </div>
+      ${view === 'resellers'
+        ? (byReseller || '<p class="meta">Aucune vente sur cette période.</p>')
+        : (byProfile || '<p class="meta">Aucune vente sur cette période.</p>')}
     </section>
   `;
 }
@@ -725,27 +833,38 @@ async function loadWorkspace(options = {}) {
     render();
   }
 
+  // Sync MikroTik seulement sur Rapport / Recettes (évite double lecture routeur).
+  const syncSales = !light && state.tab === 'sales';
+  const syncRecettes = !light && state.tab === 'recettes';
+  // rematch scripts : uniquement onglet Vendeurs (pas à chaque navigation).
+  const resellerLight = light || state.tab !== 'resellers';
+
   const resellerQs = new URLSearchParams();
   if (state.resellerMonth) resellerQs.set('month', state.resellerMonth);
-  if (light) resellerQs.set('light', '1');
+  if (resellerLight) resellerQs.set('light', '1');
   const resellerUrl = `/api/admin/resellers${resellerQs.toString() ? `?${resellerQs}` : ''}`;
   const salesQs = salesQuery();
-  const salesUrl = `/api/admin/sales?${salesQs}${salesQs ? '&' : ''}sync=${light ? '0' : '1'}`;
+  const salesUrl = `/api/admin/sales?${salesQs}${salesQs ? '&' : ''}sync=${syncSales ? '1' : '0'}`;
 
   const jobs = [
     api(resellerUrl).then((resellers) => {
       state.resellers = resellers.resellers || [];
       state.resellerMonth = resellers.month;
     }),
-    api(salesUrl).then((sales) => {
-      state.sales = sales;
-      state.salesFrom = sales.period.from;
-      state.salesTo = sales.period.to;
-      state.usage = {};
-      state.usageWarning = '';
-    }),
   ];
-  if (state.profilesRouterId) {
+  // Sur Recettes : pas besoin de recharger toute la liste Rapport (sync déjà dans recettes).
+  if (state.tab !== 'recettes' || !state.sales) {
+    jobs.push(
+      api(salesUrl).then((sales) => {
+        state.sales = sales;
+        state.salesFrom = sales.period.from;
+        state.salesTo = sales.period.to;
+        state.usage = {};
+        state.usageWarning = '';
+      }),
+    );
+  }
+  if (state.profilesRouterId && (state.tab === 'profiles' || !state.profiles.length)) {
     jobs.push(
       api(`/api/admin/profiles?routerId=${state.profilesRouterId}`).then((profiles) => {
         state.profiles = profiles.profiles || [];
@@ -754,7 +873,7 @@ async function loadWorkspace(options = {}) {
   }
   await Promise.all(jobs);
   if (state.tab === 'sales') loadUsage();
-  if (state.tab === 'recettes') await loadRecettes({ sync: !light });
+  if (state.tab === 'recettes') await loadRecettes({ sync: syncRecettes });
   if (state.tab === 'actifs') loadActifs();
 }
 
@@ -778,16 +897,26 @@ async function warmWorkspaceInBackground() {
   try {
     const resellerQs = new URLSearchParams();
     if (state.resellerMonth) resellerQs.set('month', state.resellerMonth);
-    const [resellers, sales] = await Promise.all([
-      api(`/api/admin/resellers${resellerQs.toString() ? `?${resellerQs}` : ''}`),
-      api(`/api/admin/sales?${salesQuery()}&sync=1`),
-    ]);
-    state.resellers = resellers.resellers || [];
-    state.resellerMonth = resellers.month;
-    state.sales = sales;
-    state.salesFrom = sales.period.from;
-    state.salesTo = sales.period.to;
-    if (state.tab === 'recettes') await loadRecettes({ sync: false });
+    const warmSync = state.tab === 'sales' || state.tab === 'recettes';
+    const jobs = [
+      api(`/api/admin/resellers?${resellerQs.toString()}${resellerQs.toString() ? '&' : ''}light=1`),
+    ];
+    if (state.tab === 'recettes') {
+      jobs.push(loadRecettes({ sync: warmSync }));
+    } else {
+      jobs.push(
+        api(`/api/admin/sales?${salesQuery()}&sync=${warmSync ? '1' : '0'}`).then((sales) => {
+          state.sales = sales;
+          state.salesFrom = sales.period.from;
+          state.salesTo = sales.period.to;
+        }),
+      );
+    }
+    const [resellers] = await Promise.all(jobs);
+    if (resellers && resellers.resellers) {
+      state.resellers = resellers.resellers || [];
+      state.resellerMonth = resellers.month;
+    }
     if (state.tab === 'resellers' || state.tab === 'sales' || state.tab === 'recettes') render();
   } catch {
     /* warm optionnel */
@@ -874,6 +1003,7 @@ async function refresh(message, options = {}) {
     await loadWorkspace({ light });
     if (message) showToast(message, 'ok');
   }, {
+    busyLabel: light ? 'Mise à jour…' : 'Chargement…',
     before: () => { state.busy = true; },
     after: () => { state.busy = false; },
   });
@@ -889,7 +1019,27 @@ app.addEventListener('submit', async (event) => {
   event.preventDefault();
   const data = formData(form);
   const savedTop = rememberSheetScroll();
+  const busyLabels = {
+    'lot-search': 'Recherche des tickets sur le routeur…',
+    'lot-assign': 'Attribution des tickets…',
+    'lot-remove': 'Retrait des commentaires…',
+    login: 'Connexion…',
+    setup: 'Création du compte…',
+    router: 'Enregistrement du routeur…',
+    'edit-router': 'Mise à jour du routeur…',
+    reseller: 'Enregistrement du revendeur…',
+    'reseller-update': 'Mise à jour du revendeur…',
+    stock: 'Ajout du stock…',
+    reach: 'Enregistrement…',
+    uptime: 'Enregistrement…',
+    currency: 'Enregistrement…',
+    'sales-filter': 'Chargement du rapport…',
+    'recettes-filter': 'Calcul des recettes…',
+    'actifs-filter': 'Lecture des sessions…',
+    'admin-password': 'Enregistrement du mot de passe…',
+  };
   state.busy = true;
+  showAppBusy(busyLabels[form.dataset.form] || 'Traitement en cours…');
   render();
   restoreSheetScroll(savedTop);
   try {
@@ -1046,10 +1196,28 @@ app.addEventListener('submit', async (event) => {
       showToast('Devise enregistrée.', 'ok');
       return;
     }
+    if (form.dataset.form === 'admin-password') {
+      if (data.password !== data.confirm) {
+        showToast('Les deux nouveaux mots de passe ne correspondent pas.', 'err');
+        return;
+      }
+      await api('/api/admin/password', {
+        method: 'POST',
+        body: {
+          currentPassword: data.currentPassword,
+          password: data.password,
+          confirm: data.confirm,
+        },
+      });
+      showToast('Mot de passe admin enregistré.', 'ok');
+      form.reset();
+      return;
+    }
   } catch (error) {
     showToast(error.message, 'err');
   } finally {
     state.busy = false;
+    hideAppBusy();
     render();
     restoreSheetScroll(savedTop);
   }
@@ -1128,6 +1296,10 @@ app.addEventListener('click', async (event) => {
   const button = event.target.closest('[data-action]');
   if (!button) return;
   const action = button.dataset.action;
+  if (action === 'reset-admin') {
+    await resetAdminPasswordWithFactory();
+    return;
+  }
   if (action === 'backup') {
     try {
       await saveBackupFile();
@@ -1178,9 +1350,9 @@ app.addEventListener('click', async (event) => {
     state.tab = button.dataset.tab;
     if (state.tab !== 'actifs') stopActifsPoll();
     const periodSource = state.tab === 'recettes' ? state.recettes : state.sales;
-    if ((state.tab === 'sales' || state.tab === 'recettes') && periodSource?.monthFrom && periodSource?.todayDate) {
-      state.periodKind = 'month';
-      state.salesFrom = periodSource.monthFrom;
+    if ((state.tab === 'sales' || state.tab === 'recettes') && periodSource?.todayDate) {
+      state.periodKind = 'today';
+      state.salesFrom = periodSource.todayDate;
       state.salesTo = periodSource.todayDate;
     }
     render({ resetScroll: true });
@@ -1190,6 +1362,11 @@ app.addEventListener('click', async (event) => {
         .catch((error) => showToast(error.message, 'err'));
     }
     if (state.tab === 'actifs') loadActifs();
+    return;
+  }
+  if (action === 'recettes-view') {
+    state.recettesView = button.dataset.view === 'profiles' ? 'profiles' : 'resellers';
+    render();
     return;
   }
   if (action === 'period') {
@@ -1245,15 +1422,18 @@ app.addEventListener('click', async (event) => {
     try {
       state.busy = true;
       state.busyAction = `invite-${resellerId}`;
+      showAppBusy('Préparation de l’invitation…');
       render();
       const invite = await api(`/api/admin/resellers/${resellerId}/invite`, { method: 'POST', body: {} });
       state.busy = false;
       state.busyAction = '';
+      hideAppBusy();
       render();
       await showResellerInvite(invite);
     } catch (error) {
       state.busy = false;
       state.busyAction = '';
+      hideAppBusy();
       render();
       showToast(error.message, 'err');
     }
@@ -1316,6 +1496,11 @@ app.addEventListener('click', async (event) => {
       }
     }, {
       resetScroll: leavePage,
+      busyLabel: action === 'test-router'
+        ? 'Test du routeur…'
+        : action === 'sync-router'
+          ? 'Chargement des forfaits…'
+          : 'Traitement en cours…',
       before: () => {
         state.busy = true;
         state.busyAction = action === 'test-router' ? `test-${routerId}` : action;
@@ -1362,6 +1547,7 @@ app.addEventListener('change', async (event) => {
     const profiles = await api(`/api/admin/profiles?routerId=${state.profilesRouterId}`);
     state.profiles = profiles.profiles;
   }, {
+    busyLabel: 'Chargement des forfaits…',
     before: () => { state.busy = true; },
     after: () => { state.busy = false; },
   });
@@ -1425,6 +1611,7 @@ async function boot() {
   }
 
   state.loading = true;
+  showAppBusy('Ouverture de l’espace admin…');
   render();
   try {
     await loadWorkspace({ light: true });
@@ -1432,6 +1619,7 @@ async function boot() {
     showToast(error.message, 'err');
   } finally {
     state.loading = false;
+    hideAppBusy();
     render();
   }
 

@@ -86,9 +86,60 @@ function rememberSheetScroll() {
   return root ? root.scrollTop : 0;
 }
 
+let appBusyDepth = 0;
+
+function showAppBusy(message = 'Chargement…') {
+  appBusyDepth += 1;
+  let root = document.getElementById('app-busy');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'app-busy';
+    root.className = 'app-busy';
+    root.setAttribute('role', 'status');
+    root.setAttribute('aria-live', 'polite');
+    root.innerHTML = `
+      <div class="app-busy-card">
+        <div class="app-busy-stage" aria-hidden="true">
+          <span class="app-busy-ring app-busy-ring-a"></span>
+          <span class="app-busy-ring app-busy-ring-b"></span>
+          <span class="app-busy-core"></span>
+        </div>
+        <p class="app-busy-label" data-app-busy-label></p>
+        <div class="app-busy-bars" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(root);
+    requestAnimationFrame(() => root.classList.add('is-on'));
+  } else {
+    root.classList.add('is-on');
+  }
+  const label = root.querySelector('[data-app-busy-label]');
+  if (label) label.textContent = message || 'Chargement…';
+  root.setAttribute('aria-busy', 'true');
+}
+
+function hideAppBusy() {
+  appBusyDepth = Math.max(0, appBusyDepth - 1);
+  if (appBusyDepth > 0) return;
+  const root = document.getElementById('app-busy');
+  if (!root) return;
+  root.classList.remove('is-on');
+  root.setAttribute('aria-busy', 'false');
+  const remove = () => {
+    if (appBusyDepth > 0) return;
+    root.remove();
+  };
+  root.addEventListener('transitionend', remove, { once: true });
+  setTimeout(remove, 320);
+}
+
 async function runBusyRender(renderFn, task, options = {}) {
   const reset = Boolean(options.resetScroll);
   const top = reset ? 0 : rememberSheetScroll();
+  const busyLabel = options.busyLabel || options.message || '';
+  if (busyLabel) showAppBusy(busyLabel);
   if (typeof options.before === 'function') options.before();
   renderFn(reset ? { resetScroll: true } : {});
   if (!reset) restoreSheetScroll(top);
@@ -98,6 +149,7 @@ async function runBusyRender(renderFn, task, options = {}) {
     if (typeof options.after === 'function') options.after();
     renderFn(reset ? { resetScroll: true } : {});
     if (!reset) restoreSheetScroll(top);
+    if (busyLabel) hideAppBusy();
   }
 }
 
@@ -173,14 +225,21 @@ function showToast(message, kind = 'ok', durationMs = 2200) {
   }, durationMs);
 }
 
-function showConfirm({ title, text, confirmLabel = 'Confirmer', danger = false }) {
+function showConfirm({ title, text, confirmLabel = 'Confirmer', danger = false, passwordPrompt = '' }) {
   return new Promise((resolve) => {
+    const askPassword = Boolean(passwordPrompt);
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.innerHTML = `
-      <section class="modal" role="dialog" aria-modal="true">
+      <section class="modal ${askPassword ? 'modal-form' : ''}" role="dialog" aria-modal="true">
         <h2>${esc(title)}</h2>
         <p>${esc(text)}</p>
+        ${askPassword ? `
+          <label for="confirm-factory-password">${esc(passwordPrompt)}</label>
+          ${typeof passwordField === 'function'
+            ? passwordField({ id: 'confirm-factory-password', name: 'factoryPassword', autocomplete: 'current-password', required: true })
+            : `<input id="confirm-factory-password" name="factoryPassword" type="password" autocomplete="current-password" required>`}
+        ` : ''}
         <div class="modal-actions">
           <button type="button" class="btn-quiet" data-cancel>Annuler</button>
           <button type="button" class="${danger ? 'btn-danger' : 'btn-sell'}" data-ok>${esc(confirmLabel)}</button>
@@ -191,9 +250,31 @@ function showConfirm({ title, text, confirmLabel = 'Confirmer', danger = false }
       overlay.remove();
       resolve(value);
     };
-    overlay.querySelector('[data-cancel]').addEventListener('click', () => close(false));
-    overlay.querySelector('[data-ok]').addEventListener('click', () => close(true));
+    overlay.querySelector('[data-cancel]').addEventListener('click', () => close(askPassword ? null : false));
+    overlay.querySelector('[data-ok]').addEventListener('click', () => {
+      if (!askPassword) {
+        close(true);
+        return;
+      }
+      const input = overlay.querySelector('#confirm-factory-password');
+      const value = input ? String(input.value || '') : '';
+      if (!value.trim()) {
+        if (input) input.focus();
+        return;
+      }
+      close(value);
+    });
+    const input = overlay.querySelector('#confirm-factory-password');
+    if (input) {
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          overlay.querySelector('[data-ok]').click();
+        }
+      });
+    }
     document.body.appendChild(overlay);
+    if (input) setTimeout(() => input.focus(), 40);
   });
 }
 
@@ -202,7 +283,7 @@ async function api(url, options = {}) {
   return localApi(url, options);
 }
 
-const APP_VERSION = '2.6';
+const APP_VERSION = '2.7';
 const UPDATE_REPO = 'bertheb39/OPUS';
 const activityKey = 'opus.activity';
 const currencyKey = 'opus.currency';
