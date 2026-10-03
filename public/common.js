@@ -202,7 +202,7 @@ async function api(url, options = {}) {
   return localApi(url, options);
 }
 
-const APP_VERSION = '2.3';
+const APP_VERSION = '2.4';
 const UPDATE_REPO = 'bertheb39/OPUS';
 const activityKey = 'opus.activity';
 const currencyKey = 'opus.currency';
@@ -473,20 +473,57 @@ function showQr(code, url) {
   document.body.appendChild(overlay);
 }
 
+async function sharePlainText(text, title = 'Partager') {
+  const payload = String(text || '').trim();
+  if (!payload) throw new Error('Rien à partager.');
+  const plugin = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.RouterOs;
+  if (plugin && plugin.shareText) {
+    await plugin.shareText({ text: payload, title });
+    return 'shared';
+  }
+  if (navigator.share) {
+    await navigator.share({ title, text: payload });
+    return 'shared';
+  }
+  throw new Error('Partage indisponible sur cet appareil.');
+}
+
+async function copyPlainText(text) {
+  const payload = String(text || '');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    await navigator.clipboard.writeText(payload);
+    return;
+  }
+  const area = document.createElement('textarea');
+  area.value = payload;
+  area.setAttribute('readonly', '');
+  area.style.position = 'fixed';
+  area.style.opacity = '0';
+  document.body.appendChild(area);
+  area.select();
+  document.execCommand('copy');
+  area.remove();
+}
+
 async function showResellerInvite(invite) {
-  const shareText = String((invite && invite.shareText) || (invite && invite.token) || '').trim();
+  const token = String((invite && invite.token) || '').trim();
+  const guideText = String((invite && invite.guideText) || (invite && invite.shareText) || '').trim();
   const name = String((invite && invite.name) || 'revendeur');
-  if (!shareText) throw new Error('Invitation vide.');
+  if (!token) throw new Error('Invitation vide.');
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
     <section class="modal modal-form" role="dialog" aria-modal="true">
       <h2>Inviter ${esc(name)}</h2>
-      <p>Envoyez ce message au revendeur (WhatsApp, SMS…). Il choisit « Rejoindre avec un code », colle le message, puis entre son mot de passe.</p>
-      <textarea class="invite-share" readonly rows="8">${esc(shareText)}</textarea>
+      <p>Envoyez d’abord le guide, puis le code seul (plus simple à coller).</p>
+      <label>Guide</label>
+      <textarea class="invite-share" data-invite-guide readonly rows="6">${esc(guideText)}</textarea>
+      <label>Code à coller</label>
+      <textarea class="invite-share invite-code" data-invite-token readonly rows="4">${esc(token)}</textarea>
       <div class="modal-actions">
-        <button type="button" class="btn-sell" data-share>Partager</button>
-        <button type="button" data-copy>Copier</button>
+        <button type="button" class="btn-sell" data-share>Partager (2 messages)</button>
+        <button type="button" data-copy-code>Copier le code</button>
+        <button type="button" class="btn-quiet" data-copy-guide>Copier le guide</button>
         <button type="button" class="btn-quiet" data-ok>Fermer</button>
       </div>
     </section>
@@ -496,36 +533,38 @@ async function showResellerInvite(invite) {
     if (event.target === overlay) close();
   });
   overlay.querySelector('[data-ok]').addEventListener('click', close);
-  overlay.querySelector('[data-copy]').addEventListener('click', async () => {
+  overlay.querySelector('[data-copy-code]').addEventListener('click', async () => {
     try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(shareText);
-      } else {
-        const area = overlay.querySelector('textarea');
-        area.focus();
-        area.select();
-        document.execCommand('copy');
-      }
-      showToast('Invitation copiée.', 'ok');
+      await copyPlainText(token);
+      showToast('Code copié.', 'ok');
+    } catch (error) {
+      showToast(error.message || 'Copie impossible.', 'err');
+    }
+  });
+  overlay.querySelector('[data-copy-guide]').addEventListener('click', async () => {
+    try {
+      await copyPlainText(guideText || token);
+      showToast('Guide copié.', 'ok');
     } catch (error) {
       showToast(error.message || 'Copie impossible.', 'err');
     }
   });
   overlay.querySelector('[data-share]').addEventListener('click', async () => {
+    const button = overlay.querySelector('[data-share]');
+    button.disabled = true;
     try {
-      if (navigator.share) {
-        await navigator.share({ title: `Tickets — ${name}`, text: shareText });
-        return;
+      if (guideText) {
+        await sharePlainText(guideText, `Tickets — guide ${name}`);
+        showToast('Envoyez maintenant le code…', 'ok', 2500);
+        await new Promise((resolve) => setTimeout(resolve, 600));
       }
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(shareText);
-        showToast('Partage indisponible : invitation copiée.', 'ok');
-        return;
-      }
-      showToast('Partage indisponible sur cet appareil.', 'err');
+      await sharePlainText(token, `Tickets — code ${name}`);
+      showToast('Code prêt à envoyer.', 'ok');
     } catch (error) {
       if (error && error.name === 'AbortError') return;
       showToast(error.message || 'Partage impossible.', 'err');
+    } finally {
+      button.disabled = false;
     }
   });
   document.body.appendChild(overlay);

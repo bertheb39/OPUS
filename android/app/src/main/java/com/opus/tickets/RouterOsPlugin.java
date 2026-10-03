@@ -195,6 +195,26 @@ public class RouterOsPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void shareText(PluginCall call) {
+        String text = call.getString("text", "");
+        String title = call.getString("title", "Partager");
+        if (text == null || text.isEmpty() || getActivity() == null) {
+            call.reject("Impossible de partager.");
+            return;
+        }
+        try {
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType("text/plain");
+            send.putExtra(Intent.EXTRA_TEXT, text);
+            if (title != null && !title.isEmpty()) send.putExtra(Intent.EXTRA_SUBJECT, title);
+            getActivity().startActivity(Intent.createChooser(send, title == null || title.isEmpty() ? "Partager" : title));
+            call.resolve();
+        } catch (Exception error) {
+            call.reject("Impossible de partager.");
+        }
+    }
+
+    @PluginMethod
     public void shareImage(PluginCall call) {
         String base64 = call.getString("base64", "");
         String text = call.getString("text", "");

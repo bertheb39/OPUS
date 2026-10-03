@@ -221,6 +221,11 @@ textarea.invite-share {
   font-size: 12px;
 }
 
+textarea.invite-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  word-break: break-all;
+}
+
 button, .btn {
   display: inline-flex;
   align-items: center;

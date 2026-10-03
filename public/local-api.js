@@ -784,10 +784,19 @@ async function buildResellerInvite(resellerId) {
     assigned,
   };
   const token = await encodeInviteToken(pack);
+  const guideText = [
+    `Tickets — invitation ${reseller.hmp_name}`,
+    '',
+    '1) Ouvrez Tickets',
+    '2) Touchez « Rejoindre avec un code »',
+    '3) Collez uniquement le code reçu (message suivant)',
+    '4) Validez, puis entrez votre mot de passe revendeur',
+  ].join('\n');
   return {
     token,
     name: reseller.hmp_name,
-    shareText: `Tickets — invitation ${reseller.hmp_name}\n\n1) Ouvrez Tickets\n2) « Rejoindre avec un code »\n3) Collez ce message puis validez\n4) Entrez votre mot de passe revendeur\n\n${token}`,
+    guideText,
+    shareText: guideText,
   };
 }
 
