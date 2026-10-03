@@ -202,7 +202,7 @@ async function api(url, options = {}) {
   return localApi(url, options);
 }
 
-const APP_VERSION = '2.4';
+const APP_VERSION = '2.5';
 const UPDATE_REPO = 'bertheb39/OPUS';
 const activityKey = 'opus.activity';
 const currencyKey = 'opus.currency';
@@ -488,6 +488,20 @@ async function sharePlainText(text, title = 'Partager') {
   throw new Error('Partage indisponible sur cet appareil.');
 }
 
+async function sharePlainTexts(messages, title = 'Partager') {
+  const list = (messages || []).map((item) => String(item || '').trim()).filter(Boolean);
+  if (!list.length) throw new Error('Rien à partager.');
+  const plugin = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.RouterOs;
+  if (plugin && plugin.shareTexts) {
+    await plugin.shareTexts({ messages: list, title });
+    return 'shared';
+  }
+  for (const text of list) {
+    await sharePlainText(text, title);
+  }
+  return 'shared';
+}
+
 async function copyPlainText(text) {
   const payload = String(text || '');
   if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -515,15 +529,14 @@ async function showResellerInvite(invite) {
   overlay.innerHTML = `
     <section class="modal modal-form" role="dialog" aria-modal="true">
       <h2>Inviter ${esc(name)}</h2>
-      <p>Envoyez d’abord le guide, puis le code seul (plus simple à coller).</p>
-      <label>Guide</label>
-      <textarea class="invite-share" data-invite-guide readonly rows="6">${esc(guideText)}</textarea>
-      <label>Code à coller</label>
-      <textarea class="invite-share invite-code" data-invite-token readonly rows="4">${esc(token)}</textarea>
+      <p>Un seul bouton <strong>Partager</strong> envoie 2 messages WhatsApp : d’abord le guide, puis le code seul à coller.</p>
+      <label>Aperçu — message 1 (guide)</label>
+      <textarea class="invite-share" readonly rows="5">${esc(guideText)}</textarea>
+      <label>Aperçu — message 2 (code à coller)</label>
+      <textarea class="invite-share invite-code" readonly rows="3">${esc(token)}</textarea>
       <div class="modal-actions">
-        <button type="button" class="btn-sell" data-share>Partager (2 messages)</button>
-        <button type="button" data-copy-code>Copier le code</button>
-        <button type="button" class="btn-quiet" data-copy-guide>Copier le guide</button>
+        <button type="button" class="btn-sell" data-share>Partager</button>
+        <button type="button" class="btn-quiet" data-copy-code>Copier le code</button>
         <button type="button" class="btn-quiet" data-ok>Fermer</button>
       </div>
     </section>
@@ -541,25 +554,15 @@ async function showResellerInvite(invite) {
       showToast(error.message || 'Copie impossible.', 'err');
     }
   });
-  overlay.querySelector('[data-copy-guide]').addEventListener('click', async () => {
-    try {
-      await copyPlainText(guideText || token);
-      showToast('Guide copié.', 'ok');
-    } catch (error) {
-      showToast(error.message || 'Copie impossible.', 'err');
-    }
-  });
   overlay.querySelector('[data-share]').addEventListener('click', async () => {
     const button = overlay.querySelector('[data-share]');
     button.disabled = true;
     try {
-      if (guideText) {
-        await sharePlainText(guideText, `Tickets — guide ${name}`);
-        showToast('Envoyez maintenant le code…', 'ok', 2500);
-        await new Promise((resolve) => setTimeout(resolve, 600));
-      }
-      await sharePlainText(token, `Tickets — code ${name}`);
-      showToast('Code prêt à envoyer.', 'ok');
+      await sharePlainTexts(
+        [guideText, token].filter(Boolean),
+        `Tickets — ${name}`,
+      );
+      showToast('2 messages prêts : guide puis code.', 'ok', 3500);
     } catch (error) {
       if (error && error.name === 'AbortError') return;
       showToast(error.message || 'Partage impossible.', 'err');

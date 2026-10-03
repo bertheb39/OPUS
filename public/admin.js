@@ -31,6 +31,7 @@ const state = {
   lotOpen: 0,
   lotName: '',
   lot: null,
+  resellerQuery: '',
 };
 
 function routerOptions(selected) {
@@ -186,8 +187,22 @@ function renderProfiles() {
   `;
 }
 
+function resellerMatchesQuery(reseller, query) {
+  const q = String(query || '').trim().toLocaleLowerCase('fr');
+  if (!q) return true;
+  const hay = [
+    reseller.hmpName,
+    reseller.routerName,
+    reseller.reachHost,
+    reseller.host,
+    ...(reseller.saleKeywords || []),
+  ].join(' ').toLocaleLowerCase('fr');
+  return hay.includes(q);
+}
+
 function renderResellers() {
-  const cards = state.resellers.map((reseller) => {
+  const filtered = state.resellers.filter((reseller) => resellerMatchesQuery(reseller, state.resellerQuery));
+  const cards = filtered.map((reseller) => {
     const stock = reseller.stock.length
       ? `<p class="meta">Stock : ${reseller.stock.map((item) => `${esc(item.name)} ${esc(item.remaining)}`).join(' · ')}</p>`
       : '';
@@ -195,7 +210,7 @@ function renderResellers() {
       ? reseller.monthCodes.map((item) => `${esc(item.profile)} ${esc(item.code)}`).join(' · ')
       : '';
     return `
-      <article class="card">
+      <article class="card" data-reseller-card="${reseller.id}">
         <div class="profile-head">
           <h2>${esc(reseller.hmpName)}</h2>
           <span class="meta">${reseller.active ? 'actif' : 'off'}</span>
@@ -239,6 +254,21 @@ function renderResellers() {
 
   return `
     <section class="card">
+      <h2>Chercher un revendeur</h2>
+      <label for="reseller-search">Nom, mots-clés, routeur ou adresse</label>
+      <input
+        id="reseller-search"
+        name="resellerQuery"
+        type="search"
+        value="${esc(state.resellerQuery)}"
+        placeholder="Ex. HOME"
+        autocomplete="off"
+        autocapitalize="characters"
+        data-reseller-search
+      >
+      <p class="meta">${esc(filtered.length)} / ${esc(state.resellers.length)} affiché${filtered.length > 1 ? 's' : ''}</p>
+    </section>
+    <section class="card">
       <h2>Revendeur</h2>
       <form data-form="reseller" class="stack">
         <label>Nom sur le ticket</label>
@@ -259,7 +289,7 @@ function renderResellers() {
         </div>
       </form>
     </section>
-    ${cards || '<p class="meta">Aucun revendeur.</p>'}
+    ${cards || `<p class="meta">${state.resellers.length ? 'Aucun revendeur ne correspond à la recherche.' : 'Aucun revendeur.'}</p>`}
   `;
 }
 
@@ -911,6 +941,23 @@ app.addEventListener('submit', async (event) => {
     state.busy = false;
     render();
     restoreSheetScroll(savedTop);
+  }
+});
+
+app.addEventListener('input', (event) => {
+  const input = event.target.closest('[data-reseller-search]');
+  if (!input) return;
+  state.resellerQuery = input.value || '';
+  const start = input.selectionStart;
+  const end = input.selectionEnd;
+  render();
+  const next = app.querySelector('[data-reseller-search]');
+  if (!next) return;
+  next.focus();
+  try {
+    if (typeof start === 'number' && typeof end === 'number') next.setSelectionRange(start, end);
+  } catch {
+    // ignore
   }
 });
 

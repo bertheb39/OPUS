@@ -20,10 +20,10 @@ function renderInvite() {
   app.innerHTML = `
     <section class="card card-auth">
       <h1>Invitation</h1>
-      <p class="help">Collez le message reçu de l’administration (le code qui commence par OPUS1).</p>
+      <p class="help">Collez uniquement le code (2ᵉ message WhatsApp), qui commence par OPUS1.</p>
       <form data-form="invite">
         <label for="invite-code">Code d’invitation</label>
-        <textarea id="invite-code" name="token" rows="6" required autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Tickets — invitation…&#10;OPUS1.gz.…"></textarea>
+        <textarea id="invite-code" name="token" rows="6" required autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Collez le code OPUS1.… (2ᵉ message)"></textarea>
         <button class="btn-sell btn-block" type="submit" ${busy ? 'disabled' : ''}>Valider l’invitation</button>
       </form>
       <button class="btn-quiet btn-block" type="button" data-action="welcome">Retour</button>

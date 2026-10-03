@@ -3,6 +3,8 @@ package com.opus.tickets;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
+import androidx.activity.result.ActivityResult;
+import com.getcapacitor.annotation.ActivityCallback;
 import android.webkit.CookieManager;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
@@ -32,6 +34,9 @@ import org.json.JSONObject;
 @CapacitorPlugin(name = "RouterOs")
 public class RouterOsPlugin extends Plugin {
     private final ExecutorService pool = Executors.newCachedThreadPool();
+    private JSArray pendingShareMessages;
+    private int pendingShareIndex;
+    private PluginCall pendingShareCall;
 
     @PluginMethod
     public void run(PluginCall call) {
@@ -207,10 +212,106 @@ public class RouterOsPlugin extends Plugin {
             send.setType("text/plain");
             send.putExtra(Intent.EXTRA_TEXT, text);
             if (title != null && !title.isEmpty()) send.putExtra(Intent.EXTRA_SUBJECT, title);
-            getActivity().startActivity(Intent.createChooser(send, title == null || title.isEmpty() ? "Partager" : title));
-            call.resolve();
+            startActivityForResult(
+                call,
+                Intent.createChooser(send, title == null || title.isEmpty() ? "Partager" : title),
+                "shareTextFinished"
+            );
         } catch (Exception error) {
             call.reject("Impossible de partager.");
+        }
+    }
+
+    @ActivityCallback
+    private void shareTextFinished(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void shareTexts(PluginCall call) {
+        JSArray messages = call.getArray("messages");
+        if (messages == null || messages.length() == 0 || getActivity() == null) {
+            call.reject("Impossible de partager.");
+            return;
+        }
+        pendingShareMessages = messages;
+        pendingShareIndex = 0;
+        pendingShareCall = call;
+        shareNextText();
+    }
+
+    private void shareNextText() {
+        PluginCall call = pendingShareCall;
+        JSArray messages = pendingShareMessages;
+        if (call == null || messages == null) return;
+        try {
+            if (pendingShareIndex >= messages.length()) {
+                pendingShareMessages = null;
+                pendingShareCall = null;
+                call.resolve();
+                return;
+            }
+            Object raw = messages.get(pendingShareIndex);
+            String text = raw == null ? "" : String.valueOf(raw);
+            if (text.isEmpty()) {
+                pendingShareIndex += 1;
+                shareNextText();
+                return;
+            }
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType("text/plain");
+            send.putExtra(Intent.EXTRA_TEXT, text);
+            startActivityForResult(call, Intent.createChooser(send, "Partager"), "shareTextsFinished");
+        } catch (Exception error) {
+            pendingShareMessages = null;
+            pendingShareCall = null;
+            call.reject("Impossible de partager.");
+        }
+    }
+
+    @ActivityCallback
+    private void shareTextsFinished(PluginCall call, ActivityResult result) {
+        if (call == null && pendingShareCall == null) return;
+        if (call != null) pendingShareCall = call;
+        pendingShareIndex += 1;
+        shareNextText();
+    }
+
+    @PluginMethod
+    public void shareImage(PluginCall call) {
+        String base64 = call.getString("base64", "");
+        String text = call.getString("text", "");
+        String name = call.getString("name", "ticket-qr.png");
+        if (base64 == null || base64.isEmpty() || getActivity() == null || getContext() == null) {
+            call.reject("Impossible de partager le QR.");
+            return;
+        }
+        try {
+            String raw = base64;
+            int comma = raw.indexOf(',');
+            if (raw.startsWith("data:") && comma >= 0) raw = raw.substring(comma + 1);
+            byte[] bytes = android.util.Base64.decode(raw, android.util.Base64.DEFAULT);
+            File dir = new File(getContext().getCacheDir(), "share");
+            if (!dir.exists() && !dir.mkdirs()) {
+                call.reject("Impossible de partager le QR.");
+                return;
+            }
+            String safeName = (name == null || name.isEmpty()) ? "ticket-qr.png" : name.replaceAll("[^A-Za-z0-9._-]", "_");
+            File file = new File(dir, safeName);
+            try (FileOutputStream out = new FileOutputStream(file)) {
+                out.write(bytes);
+            }
+            Uri uri = FileProvider.getUriForFile(getContext(), getContext().getPackageName() + ".fileprovider", file);
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType("image/png");
+            send.putExtra(Intent.EXTRA_STREAM, uri);
+            if (text != null && !text.isEmpty()) send.putExtra(Intent.EXTRA_TEXT, text);
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            getActivity().startActivity(Intent.createChooser(send, "Partager le ticket"));
+            call.resolve();
+        } catch (Exception error) {
+            call.reject("Impossible de partager le QR.");
         }
     }
 

@@ -723,34 +723,70 @@ function base64UrlToBytes(text) {
   return bytes;
 }
 
+async function readStreamBytes(stream) {
+  const reader = stream.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    chunks.push(value);
+    total += value.length;
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  chunks.forEach((chunk) => {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  });
+  return out;
+}
+
+/** Évite Blob.stream()/Response — source fréquente de « Failed to fetch » sur WebView. */
+async function transformBytes(bytes, TransformStreamCtor, format) {
+  const transform = new TransformStreamCtor(format);
+  const writer = transform.writable.getWriter();
+  await writer.write(bytes);
+  await writer.close();
+  return readStreamBytes(transform.readable);
+}
+
 async function encodeInviteToken(pack) {
   const json = new TextEncoder().encode(JSON.stringify(pack));
-  if (typeof CompressionStream === 'function') {
-    try {
-      const stream = new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'));
-      const compressed = new Uint8Array(await new Response(stream).arrayBuffer());
-      return `OPUS1.gz.${bytesToBase64Url(compressed)}`;
-    } catch {
-      // repli sans compression
-    }
-  }
+  // Invitation allégée : plain OPUS1 (fiable). Pas de gzip / Blob.stream.
   return `OPUS1.${bytesToBase64Url(json)}`;
 }
 
 async function decodeInviteToken(token) {
-  const text = String(token || '').trim().replace(/\s+/g, '');
-  const gzipMatch = text.match(/^OPUS1\.gz\.([A-Za-z0-9_-]+)$/);
-  const plainMatch = text.match(/^OPUS1\.([A-Za-z0-9_-]+)$/);
+  const text = String(token || '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim()
+    .replace(/\s+/g, '');
+  const gzipMatch = text.match(/OPUS1\.gz\.([A-Za-z0-9_-]+)/i);
+  const plainMatch = !gzipMatch && text.match(/OPUS1\.([A-Za-z0-9_-]+)/i);
   if (!gzipMatch && !plainMatch) {
-    throw new Error('Code d’invitation invalide. Collez le message complet reçu de l’administration.');
+    throw new Error('Code d’invitation invalide. Collez uniquement le code (message OPUS1…).');
   }
-  let bytes = base64UrlToBytes((gzipMatch || plainMatch)[1]);
+  let bytes;
+  try {
+    bytes = base64UrlToBytes((gzipMatch || plainMatch)[1]);
+  } catch {
+    throw new Error('Code d’invitation illisible.');
+  }
   if (gzipMatch) {
     if (typeof DecompressionStream !== 'function') {
       throw new Error('Cet appareil ne peut pas lire cette invitation. Mettez à jour l’application.');
     }
-    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
-    bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+    try {
+      bytes = await transformBytes(bytes, DecompressionStream, 'gzip');
+    } catch (error) {
+      const msg = String((error && error.message) || '');
+      if (/failed to fetch|networkerror|load failed/i.test(msg)) {
+        throw new Error('Code d’invitation illisible sur cet appareil. Demandez un nouveau code (app à jour).');
+      }
+      throw new Error('Code d’invitation illisible ou incomplet.');
+    }
   }
   let pack;
   try {
@@ -770,18 +806,53 @@ async function buildResellerInvite(resellerId) {
   if (reseller.active !== 1) throw new Error('Réactivez ce revendeur avant de l’inviter.');
   const router = await getOne('routers', Number(reseller.router_id));
   if (!router) throw new Error('Routeur du revendeur introuvable.');
-  const profiles = (await getAll('profiles')).filter((item) => Number(item.router_id) === Number(router.id));
+  const profiles = (await getAll('profiles'))
+    .filter((item) => Number(item.router_id) === Number(router.id) && item.active === 1 && profileSellable(item))
+    .map((item) => ({
+      id: item.id,
+      router_id: item.router_id,
+      name: item.name,
+      price: item.price,
+      validity: item.validity,
+      uptime_hint: item.uptime_hint,
+      limit_uptime: item.limit_uptime,
+      rate_limit: item.rate_limit || '',
+      active: item.active,
+      sellable: item.sellable,
+    }));
   const stock = (await getAll('stock')).filter((item) => Number(item.reseller_id) === Number(reseller.id));
-  const assigned = (await getAll('assigned')).filter((item) => Number(item.reseller_id) === Number(reseller.id));
+  // Les lots déjà sur le routeur se réattribuent depuis l’admin ; on garde l’invitation légère.
   const pack = {
     opusInvite: 1,
     createdAt: new Date().toISOString(),
     currency: localStorage.getItem('opus.currency') || 'XOF',
-    reseller,
-    router,
+    reseller: {
+      id: reseller.id,
+      username: reseller.username,
+      password_hash: reseller.password_hash,
+      hmp_code: reseller.hmp_code,
+      hmp_codes: reseller.hmp_codes,
+      hmp_name: reseller.hmp_name,
+      sale_keywords: reseller.sale_keywords,
+      rate_percent: reseller.rate_percent,
+      router_id: reseller.router_id,
+      host: reseller.host,
+      active: reseller.active,
+      created_at: reseller.created_at,
+    },
+    router: {
+      id: router.id,
+      name: router.name,
+      host: router.host,
+      admin_host: router.admin_host || '',
+      port: router.port,
+      username: router.username,
+      password: router.password,
+      created_at: router.created_at,
+    },
     profiles,
     stock,
-    assigned,
+    assigned: [],
   };
   const token = await encodeInviteToken(pack);
   const guideText = [
@@ -1841,7 +1912,11 @@ async function handle(method, url, body) {
       const result = await importResellerInvite(body.token || body.code || '');
       return ok(result);
     } catch (error) {
-      return fail(400, error.message || 'Invitation refusée.');
+      const msg = String((error && error.message) || '');
+      if (/failed to fetch|networkerror|load failed/i.test(msg)) {
+        return fail(400, 'Invitation illisible. Collez uniquement le code OPUS1… du 2ᵉ message.');
+      }
+      return fail(400, msg || 'Invitation refusée.');
     }
   }
 
@@ -2839,6 +2914,10 @@ async function localApi(url, options = {}) {
     noteDataChange(method, url);
     return result.data;
   } catch (error) {
+    const message = String((error && error.message) || error || '');
+    if (/failed to fetch|networkerror|load failed/i.test(message)) {
+      throw new Error('Opération locale impossible. Réessayez ou collez uniquement le code OPUS1…');
+    }
     if (error && error.message && error.message !== 'Failed to execute') throw error;
     throw new Error('Stockage local indisponible.');
   }
