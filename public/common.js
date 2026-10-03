@@ -202,7 +202,7 @@ async function api(url, options = {}) {
   return localApi(url, options);
 }
 
-const APP_VERSION = '2.5';
+const APP_VERSION = '2.6';
 const UPDATE_REPO = 'bertheb39/OPUS';
 const activityKey = 'opus.activity';
 const currencyKey = 'opus.currency';
@@ -523,16 +523,35 @@ async function showResellerInvite(invite) {
   const token = String((invite && invite.token) || '').trim();
   const guideText = String((invite && invite.guideText) || (invite && invite.shareText) || '').trim();
   const name = String((invite && invite.name) || 'revendeur');
+  const meta = invite && invite.meta ? invite.meta : null;
+  const lots = meta ? Number(meta.assigned) || 0 : null;
+  const stockTotal = meta ? Number(meta.stockTotal) || 0 : null;
+  const pending = meta ? Number(meta.pending) || 0 : null;
+  const profiles = meta ? Number(meta.profiles) || 0 : null;
+  const summary = meta
+    ? `Ce code emporte : ${profiles} forfait${profiles > 1 ? 's' : ''} · ${lots} lot${lots > 1 ? 's' : ''}${pending ? ` (${pending} en cours)` : ''} · stock app ${stockTotal}.`
+    : '';
+  // WhatsApp n’accepte qu’un partage à la fois : on envoie le guide, le code est déjà copié
+  // pour le coller comme 2ᵉ message dans le même chat, sans revenir dans Tickets.
+  const shareBody = [
+    guideText,
+    '',
+    '———',
+    'Ensuite, dans le même chat : appuyez longuement → Coller',
+    '(le code OPUS1… est déjà dans le presse-papiers)',
+  ].join('\n');
   if (!token) throw new Error('Invitation vide.');
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
     <section class="modal modal-form" role="dialog" aria-modal="true">
       <h2>Inviter ${esc(name)}</h2>
-      <p>Un seul bouton <strong>Partager</strong> envoie 2 messages WhatsApp : d’abord le guide, puis le code seul à coller.</p>
-      <label>Aperçu — message 1 (guide)</label>
-      <textarea class="invite-share" readonly rows="5">${esc(guideText)}</textarea>
-      <label>Aperçu — message 2 (code à coller)</label>
+      <p><strong>Partager</strong> ouvre WhatsApp une seule fois (guide). Le code est copié automatiquement : collez-le juste après dans le même chat.</p>
+      ${summary ? `<p class="meta">${esc(summary)}</p>` : ''}
+      ${meta && lots === 0 && stockTotal === 0 ? '<p class="meta">Aucun lot ni stock dans ce code : attribuez d’abord des lots (ou ajoutez du stock), puis renvoyez l’invitation.</p>' : ''}
+      <label>Aperçu — message partagé (guide)</label>
+      <textarea class="invite-share" readonly rows="6">${esc(shareBody)}</textarea>
+      <label>Code (copié au partage — 2ᵉ message à coller)</label>
       <textarea class="invite-share invite-code" readonly rows="3">${esc(token)}</textarea>
       <div class="modal-actions">
         <button type="button" class="btn-sell" data-share>Partager</button>
@@ -558,11 +577,9 @@ async function showResellerInvite(invite) {
     const button = overlay.querySelector('[data-share]');
     button.disabled = true;
     try {
-      await sharePlainTexts(
-        [guideText, token].filter(Boolean),
-        `Tickets — ${name}`,
-      );
-      showToast('2 messages prêts : guide puis code.', 'ok', 3500);
+      await copyPlainText(token);
+      await sharePlainText(shareBody, `Tickets — ${name}`);
+      showToast('Guide envoyé. Collez le code (déjà copié) comme 2ᵉ message.', 'ok', 4500);
     } catch (error) {
       if (error && error.name === 'AbortError') return;
       showToast(error.message || 'Partage impossible.', 'err');

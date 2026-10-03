@@ -137,7 +137,12 @@ app.addEventListener('submit', async (event) => {
       needsSetup = false;
       busy = false;
       renderEnter({ setup: false });
-      showToast(`Compte ${result.name || 'revendeur'} prêt. Entrez votre mot de passe.`, 'ok', 4500);
+      const lots = Number(result.assigned) || 0;
+      const stock = Number(result.stock) || 0;
+      const detail = lots || stock
+        ? ` (${lots} lot${lots > 1 ? 's' : ''}${stock ? `, stock ${stock}` : ''})`
+        : '';
+      showToast(`Compte ${result.name || 'revendeur'} prêt${detail}. Entrez votre mot de passe.`, 'ok', 4500);
       return;
     }
     const result = await api('/api/enter', { method: 'POST', body: data });

@@ -341,6 +341,104 @@ function settlementFromSales(sales, resellers, routers = []) {
   };
 }
 
+/** Récap recettes : totaux + détail par revendeur et par forfait (parts selon le taux de chaque vendeur). */
+function recettesReport(sales, resellers, routers = []) {
+  const map = new Map(resellers.map((item) => [Number(item.id), item]));
+  const routerMap = new Map(routers.map((item) => [Number(item.id), item]));
+  const byReseller = new Map();
+  const byProfile = new Map();
+  let count = 0;
+  let total = 0;
+  let resellerShare = 0;
+  let networkShare = 0;
+  let missingRate = 0;
+  let missingAmount = 0;
+
+  for (const sale of sales || []) {
+    const amount = Number(sale.price) || 0;
+    count += 1;
+    total += amount;
+    const resellerId = Number(sale.reseller_id) || 0;
+    const reseller = map.get(resellerId);
+    const share = shareFromAmount(amount, reseller ? reseller.rate_percent : null);
+    const resellerName = (reseller && reseller.hmp_name)
+      || sale.reseller_name
+      || 'Sans revendeur';
+    const routerId = reseller
+      ? Number(reseller.router_id)
+      : Number(sale.router_id) || 0;
+    const router = routerMap.get(routerId);
+    const routerName = (router && router.name) || '';
+    const profile = String(sale.profile_name || sale.profile || '—').trim() || '—';
+
+    if (!byReseller.has(resellerId)) {
+      byReseller.set(resellerId, {
+        id: resellerId,
+        name: resellerName,
+        routerName,
+        rate: share.rate,
+        count: 0,
+        amount: 0,
+        resellerShare: 0,
+        networkShare: 0,
+        missingRate: 0,
+      });
+    }
+    const resellerRow = byReseller.get(resellerId);
+    resellerRow.count += 1;
+    resellerRow.amount += amount;
+    if (share.rate == null) {
+      resellerRow.missingRate += 1;
+      missingRate += 1;
+      missingAmount += amount;
+    } else {
+      resellerRow.rate = share.rate;
+      resellerRow.resellerShare += share.resellerShare;
+      resellerRow.networkShare += share.networkShare;
+      resellerShare += share.resellerShare;
+      networkShare += share.networkShare;
+    }
+
+    if (!byProfile.has(profile)) {
+      byProfile.set(profile, {
+        profile,
+        count: 0,
+        amount: 0,
+        resellerShare: 0,
+        networkShare: 0,
+        missingRate: 0,
+      });
+    }
+    const profileRow = byProfile.get(profile);
+    profileRow.count += 1;
+    profileRow.amount += amount;
+    if (share.rate == null) {
+      profileRow.missingRate += 1;
+    } else {
+      profileRow.resellerShare += share.resellerShare;
+      profileRow.networkShare += share.networkShare;
+    }
+  }
+
+  const resellersList = [...byReseller.values()].sort((a, b) => (
+    b.amount - a.amount || a.name.localeCompare(b.name, 'fr')
+  ));
+  const profilesList = [...byProfile.values()].sort((a, b) => (
+    b.amount - a.amount || a.profile.localeCompare(b.profile, 'fr')
+  ));
+
+  return {
+    count,
+    total,
+    resellerShare,
+    networkShare,
+    missingRate,
+    missingAmount,
+    byReseller: resellersList,
+    byProfile: profilesList,
+  };
+}
+
 function resellerSaleLabels(reseller) {
   const labels = [reseller.hmp_name, ...(Array.isArray(reseller.sale_keywords) ? reseller.sale_keywords : [])];
   return [...new Set(labels.map((item) => String(item || '').trim()).filter(Boolean))];
@@ -754,7 +852,17 @@ async function transformBytes(bytes, TransformStreamCtor, format) {
 
 async function encodeInviteToken(pack) {
   const json = new TextEncoder().encode(JSON.stringify(pack));
-  // Invitation allégée : plain OPUS1 (fiable). Pas de gzip / Blob.stream.
+  // Gzip seulement si ça réduit vraiment — via WritableStream (pas Blob.stream).
+  if (typeof CompressionStream === 'function' && json.length > 1500) {
+    try {
+      const compressed = await transformBytes(json, CompressionStream, 'gzip');
+      if (compressed.length + 20 < json.length) {
+        return `OPUS1.gz.${bytesToBase64Url(compressed)}`;
+      }
+    } catch {
+      // repli plain
+    }
+  }
   return `OPUS1.${bytesToBase64Url(json)}`;
 }
 
@@ -806,8 +914,10 @@ async function buildResellerInvite(resellerId) {
   if (reseller.active !== 1) throw new Error('Réactivez ce revendeur avant de l’inviter.');
   const router = await getOne('routers', Number(reseller.router_id));
   if (!router) throw new Error('Routeur du revendeur introuvable.');
+
+  // Tous les forfaits du routeur (actifs ou non) : prix des lots + codes du mois.
   const profiles = (await getAll('profiles'))
-    .filter((item) => Number(item.router_id) === Number(router.id) && item.active === 1 && profileSellable(item))
+    .filter((item) => Number(item.router_id) === Number(router.id))
     .map((item) => ({
       id: item.id,
       router_id: item.router_id,
@@ -820,47 +930,62 @@ async function buildResellerInvite(resellerId) {
       active: item.active,
       sellable: item.sellable,
     }));
-  const stock = (await getAll('stock')).filter((item) => Number(item.reseller_id) === Number(reseller.id));
-  // Les lots déjà sur le routeur se réattribuent depuis l’admin ; on garde l’invitation légère.
+
+  const stock = (await getAll('stock'))
+    .filter((item) => Number(item.reseller_id) === Number(reseller.id))
+    .map((item) => ({
+      id: item.id,
+      reseller_id: item.reseller_id,
+      profile_id: item.profile_id,
+      remaining: Number(item.remaining) || 0,
+    }));
+
+  // Lots attribués + remises en cours : indispensables (IndexedDB séparée de l’admin).
+  const assigned = (await getAll('assigned'))
+    .filter((item) => Number(item.reseller_id) === Number(reseller.id))
+    .map((item) => ({
+      id: item.id,
+      router_id: item.router_id,
+      reseller_id: item.reseller_id,
+      name: item.name,
+      password: item.password || item.name,
+      profile: item.profile || '',
+      profile_id: item.profile_id,
+      comment: item.comment || '',
+      assigned_at: item.assigned_at || new Date().toISOString(),
+      handed_at: item.handed_at || null,
+      channel: item.channel || null,
+    }));
+
+  // Compte revendeur + routeur : copie intégrale des champs connus (évite d’oublier un attribut).
   const pack = {
     opusInvite: 1,
     createdAt: new Date().toISOString(),
     currency: localStorage.getItem('opus.currency') || 'XOF',
-    reseller: {
-      id: reseller.id,
-      username: reseller.username,
-      password_hash: reseller.password_hash,
-      hmp_code: reseller.hmp_code,
-      hmp_codes: reseller.hmp_codes,
-      hmp_name: reseller.hmp_name,
-      sale_keywords: reseller.sale_keywords,
-      rate_percent: reseller.rate_percent,
-      router_id: reseller.router_id,
-      host: reseller.host,
-      active: reseller.active,
-      created_at: reseller.created_at,
-    },
+    reseller: { ...reseller },
     router: {
-      id: router.id,
-      name: router.name,
-      host: router.host,
+      ...router,
       admin_host: router.admin_host || '',
-      port: router.port,
-      username: router.username,
-      password: router.password,
-      created_at: router.created_at,
+      host: router.host || '',
+      port: Number(router.port) || 8728,
+      username: router.username || '',
+      password: router.password || '',
     },
     profiles,
     stock,
-    assigned: [],
+    assigned,
+    // Volontairement absents du code WhatsApp :
+    // - admins / autres revendeurs (sécurité)
+    // - sales (historique) : trop volumineux ; resynchronisé depuis le routeur (scripts HAP)
   };
+
   const token = await encodeInviteToken(pack);
   const guideText = [
     `Tickets — invitation ${reseller.hmp_name}`,
     '',
     '1) Ouvrez Tickets',
     '2) Touchez « Rejoindre avec un code »',
-    '3) Collez uniquement le code reçu (message suivant)',
+    '3) Collez uniquement le code OPUS1… (2ᵉ message, ou presse-papiers)',
     '4) Validez, puis entrez votre mot de passe revendeur',
   ].join('\n');
   return {
@@ -868,6 +993,13 @@ async function buildResellerInvite(resellerId) {
     name: reseller.hmp_name,
     guideText,
     shareText: guideText,
+    meta: {
+      profiles: profiles.length,
+      stockRows: stock.length,
+      stockTotal: stock.reduce((sum, row) => sum + (Number(row.remaining) || 0), 0),
+      assigned: assigned.length,
+      pending: assigned.filter((item) => item.handed_at).length,
+    },
   };
 }
 
@@ -881,29 +1013,71 @@ async function importResellerInvite(token) {
   if (existing.some((item) => Number(item.id) !== Number(pack.reseller.id))) {
     throw new Error('Cet appareil a déjà un autre compte revendeur. Désinstallez l’app ou effacez ses données, puis réessayez.');
   }
+  if (!pack.router || !pack.router.id || !pack.reseller || !pack.reseller.id) {
+    throw new Error('Cette invitation est inutilisable.');
+  }
   const routerId = Number(pack.router.id);
   const resellerId = Number(pack.reseller.id);
-  await putOne('routers', pack.router);
+  await putOne('routers', {
+    ...pack.router,
+    id: routerId,
+    admin_host: pack.router.admin_host || '',
+    port: Number(pack.router.port) || 8728,
+  });
   const oldProfiles = (await getAll('profiles')).filter((item) => Number(item.router_id) === routerId);
   for (const profile of oldProfiles) await deleteOne('profiles', profile.id);
   for (const profile of pack.profiles || []) {
-    if (profile && typeof profile === 'object') await putOne('profiles', profile);
+    if (profile && typeof profile === 'object' && profile.id != null) {
+      await putOne('profiles', { ...profile, router_id: routerId });
+    }
   }
-  await putOne('resellers', pack.reseller);
+  await putOne('resellers', {
+    ...pack.reseller,
+    id: resellerId,
+    router_id: Number(pack.reseller.router_id) || routerId,
+    active: pack.reseller.active === 0 ? 0 : 1,
+  });
   const oldStock = (await getAll('stock')).filter((item) => Number(item.reseller_id) === resellerId);
   for (const row of oldStock) await deleteOne('stock', row.id);
   for (const row of pack.stock || []) {
-    if (row && typeof row === 'object') await putOne('stock', row);
+    if (row && typeof row === 'object' && row.id) {
+      await putOne('stock', {
+        id: row.id,
+        reseller_id: resellerId,
+        profile_id: row.profile_id,
+        remaining: Number(row.remaining) || 0,
+      });
+    }
   }
   const oldAssigned = (await getAll('assigned')).filter((item) => Number(item.reseller_id) === resellerId);
   for (const row of oldAssigned) await deleteOne('assigned', row.id);
   for (const row of pack.assigned || []) {
-    if (row && typeof row === 'object') await putOne('assigned', row);
+    if (!row || typeof row !== 'object' || !row.name) continue;
+    const id = row.id || `${routerId}:${row.name}`;
+    await putOne('assigned', {
+      id,
+      router_id: Number(row.router_id) || routerId,
+      reseller_id: resellerId,
+      name: row.name,
+      password: row.password || row.name,
+      profile: row.profile || '',
+      profile_id: row.profile_id,
+      comment: row.comment || '',
+      assigned_at: row.assigned_at || new Date().toISOString(),
+      handed_at: row.handed_at || undefined,
+      channel: row.channel || undefined,
+    });
   }
   const currency = String(pack.currency || '');
   if (['XOF', 'CDF', 'EUR', 'USD'].includes(currency)) localStorage.setItem('opus.currency', currency);
   writeSession(null);
-  return { name: pack.reseller.hmp_name || 'revendeur' };
+  const assignedCount = Array.isArray(pack.assigned) ? pack.assigned.length : 0;
+  const stockTotal = (pack.stock || []).reduce((sum, row) => sum + (Number(row.remaining) || 0), 0);
+  return {
+    name: pack.reseller.hmp_name || 'revendeur',
+    assigned: assignedCount,
+    stock: stockTotal,
+  };
 }
 
 function publicRouter(router) {
@@ -1360,6 +1534,57 @@ function ticketConsumed(row) {
   return /[1-9]/.test(uptime);
 }
 
+/**
+ * Récupère les lots depuis le routeur vers IndexedDB du téléphone revendeur.
+ * - Si aucun lot local : importe les tickets non consommés du nom/mots-clés (répare invitation vide).
+ * - Sinon : ajoute les nouveaux tickets des mêmes commentaires déjà attribués.
+ */
+async function syncResellerAssignedFromRouter(reseller) {
+  const baseRouter = await getOne('routers', Number(reseller.router_id));
+  if (!baseRouter) return { added: 0 };
+  const router = routerForReseller(baseRouter, reseller) || baseRouter;
+  const labels = resellerSaleLabels(reseller);
+  if (!labels.length) return { added: 0 };
+
+  const [sales, existing] = await Promise.all([getAll('sales'), getAll('assigned')]);
+  const sold = new Set(
+    sales.filter((sale) => Number(sale.router_id) === Number(baseRouter.id)).map((sale) => sale.code),
+  );
+  const mine = existing.filter((item) => Number(item.reseller_id) === Number(reseller.id));
+  const knownComments = new Set(mine.map((item) => commentKey(item.comment)).filter(Boolean));
+  const empty = mine.length === 0;
+  let added = 0;
+
+  for (const label of labels) {
+    let rows = [];
+    try {
+      rows = await listHotspotUsersByComment(router, label);
+    } catch {
+      continue;
+    }
+    for (const row of rows) {
+      if (!row.name || sold.has(row.name) || ticketConsumed(row)) continue;
+      const key = commentKey(row.comment);
+      if (!empty && key && !knownComments.has(key)) continue;
+      const id = `${baseRouter.id}:${row.name}`;
+      if (await getOne('assigned', id)) continue;
+      await putOne('assigned', {
+        id,
+        router_id: baseRouter.id,
+        reseller_id: reseller.id,
+        name: row.name,
+        password: row.password || row.name,
+        profile: row.profile || '',
+        comment: row.comment || '',
+        assigned_at: new Date().toISOString(),
+      });
+      added += 1;
+      if (key) knownComments.add(key);
+    }
+  }
+  return { added };
+}
+
 async function readTicketUsage(router, codes) {
   const wanted = new Set(codes);
   const found = new Map();
@@ -1732,7 +1957,8 @@ function reportWindow(query, lockedResellerId) {
   const today = localDateISO(new Date());
   const month = currentMonthKey();
   const span = monthRange(month);
-  let from = query.get('from') || today;
+  // Par défaut : mois en cours (1 → aujourd’hui), pas seulement aujourd’hui.
+  let from = query.get('from') || span.start;
   let to = query.get('to') || today;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) return null;
   if (from > to) {
@@ -2427,13 +2653,15 @@ async function handle(method, url, body) {
     if (!range) return fail(400, 'La période est invalide.');
     const purged = await purgeNonScriptSales();
     const skipSync = query.get('sync') === '0';
+    // Toujours synchroniser le mois en cours pour alimenter les stats « Ce mois »,
+    // même si l’affichage filtre une sous-période (ex. aujourd’hui).
     const sync = skipSync
       ? { warning: '', created: 0, removed: 0, read: 0 }
       : await syncHapSales({
         resellerId: range.resellerId,
         routerId: range.routerId,
-        from: range.from,
-        to: range.to,
+        from: range.monthFrom,
+        to: range.today,
         force: query.get('force') === '1',
       });
     const rows = await reportRows(range);
@@ -2483,6 +2711,58 @@ async function handle(method, url, body) {
     });
   }
 
+  if (method === 'GET' && path === '/api/admin/recettes') {
+    const range = reportWindow(query, 0);
+    if (!range) return fail(400, 'La période est invalide.');
+    await purgeNonScriptSales();
+    const skipSync = query.get('sync') === '0';
+    const sync = skipSync
+      ? { warning: '', created: 0, removed: 0, read: 0 }
+      : await syncHapSales({
+        resellerId: range.resellerId,
+        routerId: range.routerId,
+        from: range.monthFrom,
+        to: range.today,
+        force: query.get('force') === '1',
+      });
+    const rows = await reportRows(range);
+    const resellers = await getAll('resellers');
+    const routers = await getAll('routers');
+    const period = recettesReport(rows.periodAll, resellers, routers);
+    const today = recettesReport(rows.todayRows, resellers, routers);
+    const month = recettesReport(rows.monthRows, resellers, routers);
+    return ok({
+      todayDate: range.today,
+      monthFrom: range.monthFrom,
+      period: {
+        from: range.from,
+        to: range.to,
+        count: period.count,
+        total: period.total,
+        resellerShare: period.resellerShare,
+        networkShare: period.networkShare,
+        missingRate: period.missingRate,
+        missingAmount: period.missingAmount,
+      },
+      today: {
+        count: today.count,
+        total: today.total,
+        resellerShare: today.resellerShare,
+        networkShare: today.networkShare,
+      },
+      month: {
+        count: month.count,
+        total: month.total,
+        resellerShare: month.resellerShare,
+        networkShare: month.networkShare,
+      },
+      byReseller: period.byReseller,
+      byProfile: period.byProfile,
+      syncWarning: sync.warning || '',
+      synced: sync.created || 0,
+    });
+  }
+
   if (method === 'GET' && path === '/api/admin/usage') {
     const range = reportWindow(query, 0);
     if (!range) return fail(400, 'La période est invalide.');
@@ -2515,6 +2795,11 @@ async function handle(method, url, body) {
   if (method === 'GET' && path === '/api/vendeur/forfaits') {
     const reseller = await getOne('resellers', resellerSession.id);
     if (!reseller || reseller.active !== 1) return fail(403, 'Compte désactivé.');
+    try {
+      await syncResellerAssignedFromRouter(reseller);
+    } catch {
+      // Vente possible avec le stock local / lots déjà importés.
+    }
     const [stocks, profiles, assigned, routers] = await Promise.all([
       getAll('stock'),
       getAll('profiles'),
@@ -2594,8 +2879,8 @@ async function handle(method, url, body) {
     const purged = await purgeNonScriptSales();
     const sync = await syncHapSales({
       resellerId: resellerSession.id,
-      from: range.from,
-      to: range.to,
+      from: range.monthFrom,
+      to: range.today,
       force: query.get('force') === '1',
     });
     const rows = await reportRows(range);

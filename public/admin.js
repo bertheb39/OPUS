@@ -13,7 +13,7 @@ const state = {
   resellerMonth: '',
   salesFrom: '',
   salesTo: '',
-  periodKind: '',
+  periodKind: 'month',
   salesRouterId: 0,
   salesResellerId: 0,
   actifsRouterId: 0,
@@ -22,6 +22,7 @@ const state = {
   usage: {},
   usageWarning: '',
   sales: null,
+  recettes: null,
   message: '',
   error: '',
   busy: false,
@@ -564,6 +565,96 @@ function renderActifs() {
   `;
 }
 
+function renderRecettes() {
+  const data = state.recettes;
+  const kind = state.periodKind || (
+    data && state.salesFrom === data.todayDate && state.salesTo === data.todayDate
+      ? 'today'
+      : (data && state.salesFrom === data.monthFrom && state.salesTo === data.todayDate ? 'month' : '')
+  );
+  const resellerOptions = ['<option value="0">Tous les revendeurs</option>'].concat(state.resellers.map((reseller) => (
+    `<option value="${reseller.id}" ${state.salesResellerId === reseller.id ? 'selected' : ''}>${esc(reseller.hmpName)}</option>`
+  ))).join('');
+  const routerOptionsHtml = ['<option value="0">Tous les PTP</option>'].concat(state.routers.map((router) => (
+    `<option value="${router.id}" ${state.salesRouterId === router.id ? 'selected' : ''}>${esc(router.name)}</option>`
+  ))).join('');
+  const period = data?.period;
+  const periodLabel = period
+    ? (period.from === period.to ? period.from : `${period.from} → ${period.to}`)
+    : '';
+  const byReseller = (data?.byReseller || []).map((row) => `
+    <article class="sale-card">
+      <div class="sale-top">
+        <strong>${esc(row.name)}</strong>
+        <span class="badge badge-price">${row.rate == null ? 'taux ?' : `${esc(row.rate)} %`}</span>
+      </div>
+      <p class="meta">${esc(row.routerName || '—')} · ${esc(row.count)} ticket${row.count > 1 ? 's' : ''}</p>
+      <div class="report-line"><span>Ventes</span><strong>${esc(money(row.amount))}</strong></div>
+      <div class="report-line report-line-ok"><span>Part revendeur</span><strong>${esc(money(row.resellerShare))}</strong></div>
+      <div class="report-line report-line-due"><span>Part réseau</span><strong>${esc(money(row.networkShare))}</strong></div>
+      ${row.missingRate ? '<p class="meta">Taux manquant sur une partie des ventes.</p>' : ''}
+    </article>
+  `).join('');
+  const byProfile = (data?.byProfile || []).map((row) => `
+    <article class="sale-card">
+      <div class="sale-top">
+        <strong>${esc(row.profile)}</strong>
+        <span class="badge badge-price">${esc(row.count)} tkt</span>
+      </div>
+      <div class="report-line"><span>Ventes</span><strong>${esc(money(row.amount))}</strong></div>
+      <div class="report-line report-line-ok"><span>Part revendeurs</span><strong>${esc(money(row.resellerShare))}</strong></div>
+      <div class="report-line report-line-due"><span>Part réseau</span><strong>${esc(money(row.networkShare))}</strong></div>
+    </article>
+  `).join('');
+
+  return `
+    <div class="stat-grid">
+      ${statCard("Aujourd'hui", data ? data.today.count : null, data ? data.today.total : null, { period: 'today', selected: kind === 'today' })}
+      ${statCard('Ce mois', data ? data.month.count : null, data ? data.month.total : null, { period: 'month', selected: kind === 'month' })}
+    </div>
+    <section class="card">
+      <h2>Recettes</h2>
+      <p class="meta">Récapitulatif des parts revendeurs et réseau sur la période.</p>
+      <div class="presets">
+        <button type="button" data-action="period" data-period="today" aria-selected="${kind === 'today' ? 'true' : 'false'}">Aujourd'hui</button>
+        <button type="button" data-action="period" data-period="month" aria-selected="${kind === 'month' ? 'true' : 'false'}">Ce mois</button>
+      </div>
+      <form data-form="recettes-filter" class="stack">
+        <div class="date-pair">
+          <div>
+            <label>Du</label>
+            <input name="from" type="date" value="${esc(state.salesFrom || data?.period?.from || '')}" required>
+          </div>
+          <div>
+            <label>Au</label>
+            <input name="to" type="date" value="${esc(state.salesTo || data?.period?.to || '')}" required>
+          </div>
+        </div>
+        <label>PTP</label>
+        <select name="routerId">${routerOptionsHtml}</select>
+        <label>Revendeur</label>
+        <select name="resellerId">${resellerOptions}</select>
+        <button type="submit">Afficher</button>
+      </form>
+      ${period ? `
+        <div class="report-line"><span>Total ventes${periodLabel ? ` (${esc(periodLabel)})` : ''}<span class="report-tickets">${esc(period.count)} ticket${period.count === 1 ? '' : 's'}</span></span><strong>${esc(money(period.total))}</strong></div>
+        <div class="report-line report-line-ok"><span>Somme parts revendeurs</span><strong>${esc(money(period.resellerShare))}</strong></div>
+        <div class="report-line report-line-due"><span>Somme parts réseau</span><strong>${esc(money(period.networkShare))}</strong></div>
+        ${period.missingRate ? `<p class="meta">${esc(period.missingRate)} vente${period.missingRate > 1 ? 's' : ''} sans taux (${esc(money(period.missingAmount || 0))})</p>` : ''}
+      ` : '<p class="meta">Chargement des recettes…</p>'}
+      ${data?.syncWarning ? `<p class="meta">${esc(data.syncWarning)}</p>` : ''}
+    </section>
+    <section class="card">
+      <h2>Par revendeur</h2>
+      ${byReseller || '<p class="meta">Aucune vente sur cette période.</p>'}
+    </section>
+    <section class="card">
+      <h2>Par forfait</h2>
+      ${byProfile || '<p class="meta">Aucune vente sur cette période.</p>'}
+    </section>
+  `;
+}
+
 function dock() {
   const items = [
     ['routers', 'Routeurs', '<rect x="4" y="8" width="16" height="10" rx="2"/><path d="M8 8V6M12 8V5M16 8V6"/>'],
@@ -571,6 +662,7 @@ function dock() {
     ['resellers', 'Vendeurs', '<circle cx="12" cy="8" r="3"/><path d="M6 19c1.2-3 3.2-4.5 6-4.5S16.8 16 18 19"/>'],
     ['actifs', 'Actifs', '<circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2"/>'],
     ['sales', 'Rapport', '<path d="M5 19V10M10 19V6M15 19v-6M20 19V8"/>'],
+    ['recettes', 'Recettes', '<path d="M4 6h16M4 12h16M4 18h10"/><circle cx="18" cy="18" r="2"/>'],
   ];
   return `
     <nav class="dock" aria-label="Navigation">
@@ -601,6 +693,7 @@ function renderApp() {
     resellers: renderResellers,
     actifs: renderActifs,
     sales: renderSales,
+    recettes: renderRecettes,
   }[state.tab]();
   app.innerHTML = `<div class="sheet">${body}</div>${dock()}`;
 }
@@ -661,7 +754,24 @@ async function loadWorkspace(options = {}) {
   }
   await Promise.all(jobs);
   if (state.tab === 'sales') loadUsage();
+  if (state.tab === 'recettes') await loadRecettes({ sync: !light });
   if (state.tab === 'actifs') loadActifs();
+}
+
+async function loadRecettes(options = {}) {
+  const sync = options.sync !== false;
+  const params = new URLSearchParams();
+  if (state.salesFrom) params.set('from', state.salesFrom);
+  if (state.salesTo) params.set('to', state.salesTo);
+  params.set('routerId', String(state.salesRouterId || 0));
+  params.set('resellerId', String(state.salesResellerId || 0));
+  params.set('sync', sync ? '1' : '0');
+  const data = await api(`/api/admin/recettes?${params.toString()}`);
+  state.recettes = data;
+  if (data?.period) {
+    state.salesFrom = data.period.from;
+    state.salesTo = data.period.to;
+  }
 }
 
 async function warmWorkspaceInBackground() {
@@ -677,7 +787,8 @@ async function warmWorkspaceInBackground() {
     state.sales = sales;
     state.salesFrom = sales.period.from;
     state.salesTo = sales.period.to;
-    if (state.tab === 'resellers' || state.tab === 'sales') render();
+    if (state.tab === 'recettes') await loadRecettes({ sync: false });
+    if (state.tab === 'resellers' || state.tab === 'sales' || state.tab === 'recettes') render();
   } catch {
     /* warm optionnel */
   }
@@ -916,7 +1027,7 @@ app.addEventListener('submit', async (event) => {
       await refresh('Stock ajouté.', { fromSubmit: true });
       return;
     }
-    if (form.dataset.form === 'sales-filter') {
+    if (form.dataset.form === 'sales-filter' || form.dataset.form === 'recettes-filter') {
       state.salesFrom = data.from;
       state.salesTo = data.to;
       state.periodKind = '';
@@ -1066,13 +1177,14 @@ app.addEventListener('click', async (event) => {
   if (action === 'tab') {
     state.tab = button.dataset.tab;
     if (state.tab !== 'actifs') stopActifsPoll();
-    if (state.tab === 'sales' && state.sales?.todayDate) {
-      state.periodKind = 'today';
-      state.salesFrom = state.sales.todayDate;
-      state.salesTo = state.sales.todayDate;
+    const periodSource = state.tab === 'recettes' ? state.recettes : state.sales;
+    if ((state.tab === 'sales' || state.tab === 'recettes') && periodSource?.monthFrom && periodSource?.todayDate) {
+      state.periodKind = 'month';
+      state.salesFrom = periodSource.monthFrom;
+      state.salesTo = periodSource.todayDate;
     }
     render({ resetScroll: true });
-    if (state.tab === 'sales') {
+    if (state.tab === 'sales' || state.tab === 'recettes') {
       loadWorkspace({ light: false })
         .then(() => { render(); })
         .catch((error) => showToast(error.message, 'err'));
@@ -1081,14 +1193,15 @@ app.addEventListener('click', async (event) => {
     return;
   }
   if (action === 'period') {
-    if (!state.sales) return;
+    const periodSource = state.tab === 'recettes' ? state.recettes : state.sales;
+    if (!periodSource) return;
     state.periodKind = button.dataset.period === 'month' ? 'month' : 'today';
     if (state.periodKind === 'today') {
-      state.salesFrom = state.sales.todayDate;
-      state.salesTo = state.sales.todayDate;
+      state.salesFrom = periodSource.todayDate;
+      state.salesTo = periodSource.todayDate;
     } else {
-      state.salesFrom = state.sales.monthFrom;
-      state.salesTo = state.sales.todayDate;
+      state.salesFrom = periodSource.monthFrom;
+      state.salesTo = periodSource.todayDate;
     }
     await refresh('');
     return;

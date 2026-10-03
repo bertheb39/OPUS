@@ -10,7 +10,7 @@ const state = {
   report: null,
   salesFrom: '',
   salesTo: '',
-  periodKind: '',
+  periodKind: 'month',
   usage: {},
   usageWarning: '',
   actifs: null,
