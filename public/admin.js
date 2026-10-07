@@ -1,12 +1,14 @@
 const app = document.getElementById('app');
 const logoutButton = document.getElementById('logout');
 const saleLink = document.getElementById('to-sale');
+const clientsLink = document.getElementById('to-clients');
 const scopeRouterSelect = document.getElementById('scope-router');
 const scopeRouterWrap = document.getElementById('scope-router-wrap');
 const scopeRouterKey = 'opus.scopeRouter';
 
 const state = {
   needsSetup: false,
+  resettingPassword: false,
   authed: false,
   tab: 'routers',
   routers: [],
@@ -28,6 +30,9 @@ const state = {
   sales: null,
   recettes: null,
   recettesView: 'resellers',
+  licenseClients: [],
+  licensePlans: [],
+  licenseRequests: [],
   message: '',
   error: '',
   busy: false,
@@ -140,34 +145,27 @@ function renderLogin() {
   `;
 }
 
-async function resetAdminPasswordWithFactory() {
-  const factoryPassword = await showConfirm({
-    title: 'Réinitialiser le mot de passe admin ?',
-    text: 'Le mot de passe d’administration redeviendra le mot de passe d’usine. Les comptes revendeurs ne sont pas modifiés.',
-    passwordPrompt: 'Veuillez saisir le mot de passe d’usine pour réinitialiser',
-    confirmLabel: 'Réinitialiser',
-    danger: true,
-  });
-  if (factoryPassword == null) return;
-  state.busy = true;
-  showAppBusy('Réinitialisation…');
-  render();
-  try {
-    await api('/api/admin/password/reset', {
-      method: 'POST',
-      body: { factoryPassword },
-    });
-    state.authed = false;
-    clearActivity();
-    showToast('Mot de passe admin réinitialisé. Connectez-vous avec le mot de passe d’usine.', 'ok', 5000);
-  } catch (error) {
-    showToast(error.message || 'Réinitialisation impossible.', 'err', 4500);
-  } finally {
-    state.busy = false;
-    hideAppBusy();
-    render();
-  }
+function renderPasswordReset() {
+  app.innerHTML = `
+    <section class="card card-auth">
+      <h1>Mot de passe oublié</h1>
+      <p class="help">Contactez d’abord HORIZON TEAM. Quand la réinit est autorisée (24 h), le même nom et le même numéro qu’à l’abonnement suffisent.</p>
+      <form data-form="reset-admin">
+        <label>Nom et prénom</label>
+        <input name="clientName" required placeholder="Nom et prénom" autocomplete="name">
+        <label>Téléphone</label>
+        <input name="phone" required placeholder="Téléphone" inputmode="tel" autocomplete="tel">
+        <label>Nouveau mot de passe</label>
+        ${passwordField({ name: 'password', autocomplete: 'new-password', required: true, minlength: 8 })}
+        <label>Confirmer</label>
+        ${passwordField({ name: 'confirm', autocomplete: 'new-password', required: true, minlength: 8 })}
+        <button class="btn-block" type="submit" ${state.busy ? 'disabled' : ''}>Enregistrer</button>
+      </form>
+      <button class="btn-quiet btn-block" type="button" data-action="back-login" ${state.busy ? 'disabled' : ''}>Retour</button>
+    </section>
+  `;
 }
+
 
 function reachMode() {
   try {
@@ -235,7 +233,9 @@ function renderRouters() {
     </section>
     <section class="card">
       <h2>Routeur</h2>
-      <form data-form="router" class="stack">
+      ${typeof licenseRights === 'function' && state.routers.length >= licenseRights().maxRouters
+        ? `<p class="meta">Plafond atteint : ${esc(licenseRights().maxRouters)} routeur(s) sur cette offre.</p>`
+        : `<form data-form="router" class="stack">
         <label>Nom</label>
         <input name="name" required placeholder="HORIZON TEAM">
         <label>Adresse locale (Wi-Fi)</label>
@@ -247,7 +247,7 @@ function renderRouters() {
         <label>Mot de passe API</label>
         ${passwordField({ name: 'password', autocomplete: 'new-password', required: true })}
         <button type="submit">Enregistrer</button>
-      </form>
+      </form>`}
     </section>
     ${renderAdminPassword()}
     ${renderCurrency()}
@@ -378,7 +378,26 @@ function renderResellers() {
     </section>
     <section class="card">
       <h2>Revendeur</h2>
-      <form data-form="reseller" class="stack">
+      ${(() => {
+        const rights = typeof licenseRights === 'function' ? licenseRights() : null;
+        if (!rights) return '';
+        const total = state.resellers.length;
+        const onRouter = state.scopeRouterId
+          ? state.resellers.filter((item) => Number(item.routerId) === Number(state.scopeRouterId)).length
+          : total;
+        if (total >= rights.maxResellers || onRouter >= rights.maxResellersPerRouter) {
+          return `<p class="meta">Plafond atteint : ${esc(rights.maxResellers)} revendeurs au total, ${esc(rights.maxResellersPerRouter)} par routeur.</p>`;
+        }
+        return '';
+      })()}
+      ${(() => {
+        const rights = typeof licenseRights === 'function' ? licenseRights() : null;
+        const total = state.resellers.length;
+        const onRouter = state.scopeRouterId
+          ? state.resellers.filter((item) => Number(item.routerId) === Number(state.scopeRouterId)).length
+          : total;
+        if (rights && (total >= rights.maxResellers || onRouter >= rights.maxResellersPerRouter)) return '';
+        return `<form data-form="reseller" class="stack">
         <label>Nom sur le ticket</label>
         <input name="hmpName" required placeholder="HORIZON TEAM" autocapitalize="characters" maxlength="40">
         <label>Mots-clés des ventes</label>
@@ -394,7 +413,8 @@ function renderResellers() {
           <button type="submit">Créer</button>
           <button type="button" class="btn-quiet" data-action="add-stock">Stock</button>
         </div>
-      </form>
+      </form>`;
+      })()}
     </section>
     ${cards || `<p class="meta">${pool.length ? 'Aucun revendeur ne correspond à la recherche.' : 'Aucun revendeur sur ce routeur.'}</p>`}
   `;
@@ -567,20 +587,22 @@ function renderAdminPassword() {
         ${passwordField({ name: 'confirm', autocomplete: 'new-password', required: true, minlength: 8 })}
         <button type="submit">Enregistrer</button>
       </form>
-      <button type="button" class="btn-quiet btn-block" data-action="reset-admin" style="margin-top:10px">Revenir au mot de passe d’usine</button>
     </section>
   `;
 }
 
 function renderBackup() {
+  const canDrive = typeof licenseAllowsDrive !== 'function' || licenseAllowsDrive();
   const account = readGoogleAccount();
-  const gmail = account.email
-    ? `<p class="meta" data-drive-status>${esc(driveStatusText())}</p>
+  const gmail = !canDrive
+    ? '<p class="meta">Votre offre utilise la copie fichier, sans Drive.</p>'
+    : (account.email
+      ? `<p class="meta" data-drive-status>${esc(driveStatusText())}</p>
        <div class="actions">
          <button type="button" data-action="drive-upload">Drive</button>
          <button type="button" class="btn-quiet" data-action="unlink-google">Retirer</button>
        </div>`
-    : `<button type="button" data-action="link-google">Lier mon Gmail</button>`;
+      : `<button type="button" data-action="link-google">Lier mon Gmail</button>`);
   return `
     <section class="card">
       <h2>Copie</h2>
@@ -862,8 +884,10 @@ function renderApp() {
     actifs: renderActifs,
     sales: renderSales,
     recettes: renderRecettes,
+    clients: typeof renderClients === 'function' ? renderClients : () => '',
   }[state.tab]();
-  app.innerHTML = `<div class="sheet">${body}</div>${dock()}`;
+  const licenseCard = typeof licenseStatusCardHtml === 'function' ? licenseStatusCardHtml() : '';
+  app.innerHTML = `<div class="sheet">${licenseCard}${body}</div>${dock()}`;
 }
 
 function render(options = {}) {
@@ -872,10 +896,20 @@ function render(options = {}) {
     document.body.classList.toggle('has-dock', state.authed);
     logoutButton.hidden = !state.authed;
     if (saleLink) saleLink.hidden = !state.authed && !isOwner();
+    if (clientsLink) {
+      const founder = state.authed && typeof isFounderLicense === 'function' && isFounderLicense();
+      clientsLink.hidden = !founder;
+      if (!founder && state.tab === 'clients') state.tab = 'routers';
+      clientsLink.setAttribute('aria-current', state.tab === 'clients' ? 'page' : 'false');
+      clientsLink.classList.toggle('is-current', state.tab === 'clients');
+    }
     paintHeaderScope();
+    if (typeof paintLicenseBadge === 'function') paintLicenseBadge();
     if (state.needsSetup) renderSetup();
+    else if (state.resettingPassword && !state.authed) renderPasswordReset();
     else if (!state.authed) renderLogin();
     else renderApp();
+    if (state.authed && typeof paintLicenseExpiryNotice === 'function') paintLicenseExpiryNotice();
   };
   if (state.authed && typeof preserveSheetScroll === 'function') {
     preserveSheetScroll(paint, Boolean(options.resetScroll));
@@ -889,6 +923,9 @@ async function loadWorkspace(options = {}) {
   const routers = await api('/api/admin/routers');
   state.routers = routers.routers || [];
   syncScopeFromRouters();
+  if (typeof loadPublicPlans === 'function') {
+    try { state.licensePlans = await loadPublicPlans(); } catch { /* catalogue local */ }
+  }
   if (state.loading) {
     state.loading = false;
     render();
@@ -1100,12 +1137,21 @@ app.addEventListener('submit', async (event) => {
     'recettes-filter': 'Calcul des recettes…',
     'actifs-filter': 'Lecture des sessions…',
     'admin-password': 'Enregistrement du mot de passe…',
+    'reset-admin': 'Réinitialisation…',
   };
   state.busy = true;
   showAppBusy(busyLabels[form.dataset.form] || 'Traitement en cours…');
   render();
   restoreSheetScroll(savedTop);
   try {
+    if (form.dataset.form === 'reset-admin') {
+      await api('/api/admin/password/reset', { method: 'POST', body: data });
+      state.resettingPassword = false;
+      state.authed = false;
+      clearActivity();
+      showToast('Mot de passe enregistré. Connectez-vous avec le nouveau.', 'ok', 5000);
+      return;
+    }
     if (form.dataset.form === 'setup') {
       await api('/api/setup', { method: 'POST', body: data });
       state.needsSetup = false;
@@ -1361,7 +1407,13 @@ app.addEventListener('click', async (event) => {
   if (!button) return;
   const action = button.dataset.action;
   if (action === 'reset-admin') {
-    await resetAdminPasswordWithFactory();
+    state.resettingPassword = true;
+    render();
+    return;
+  }
+  if (action === 'back-login') {
+    state.resettingPassword = false;
+    render();
     return;
   }
   if (action === 'backup') {
@@ -1373,6 +1425,10 @@ app.addEventListener('click', async (event) => {
     return;
   }
   if (action === 'drive-upload') {
+    if (typeof licenseAllowsDrive === 'function' && !licenseAllowsDrive()) {
+      showToast('Votre offre n’inclut pas Drive.', 'err');
+      return;
+    }
     try {
       const result = await uploadDriveBackup();
       if (result === 'ok') showToast('Copie envoyée dans Drive.', 'ok');
@@ -1387,6 +1443,10 @@ app.addEventListener('click', async (event) => {
     return;
   }
   if (action === 'link-google') {
+    if (typeof licenseAllowsDrive === 'function' && !licenseAllowsDrive()) {
+      showToast('Votre offre n’inclut pas Drive.', 'err');
+      return;
+    }
     try {
       const mode = await connectGoogle();
       if (mode === 'redirect') return;
@@ -1426,6 +1486,11 @@ app.addEventListener('click', async (event) => {
         .catch((error) => showToast(error.message, 'err'));
     }
     if (state.tab === 'actifs') loadActifs();
+    if (state.tab === 'clients' && typeof refreshLicenseClients === 'function') {
+      refreshLicenseClients()
+        .then(() => { render(); })
+        .catch((error) => showToast(error.message, 'err'));
+    }
     return;
   }
   if (action === 'recettes-view') {
@@ -1489,17 +1554,17 @@ app.addEventListener('click', async (event) => {
       showAppBusy('Préparation de l’invitation…');
       render();
       const invite = await api(`/api/admin/resellers/${resellerId}/invite`, { method: 'POST', body: {} });
+      hideAppBusy(true);
       state.busy = false;
       state.busyAction = '';
-      hideAppBusy();
       render();
       await showResellerInvite(invite);
     } catch (error) {
+      hideAppBusy(true);
       state.busy = false;
       state.busyAction = '';
-      hideAppBusy();
       render();
-      showToast(error.message, 'err');
+      showToast(error.message || 'Invitation impossible.', 'err');
     }
     return;
   }
@@ -1628,6 +1693,21 @@ if (scopeRouterSelect) {
   });
 }
 
+if (clientsLink) {
+  clientsLink.addEventListener('click', () => {
+    if (typeof isFounderLicense !== 'function' || !isFounderLicense()) return;
+    if (state.tab === 'clients') return;
+    state.tab = 'clients';
+    if (typeof stopActifsPoll === 'function') stopActifsPoll();
+    render({ resetScroll: true });
+    if (typeof refreshLicenseClients === 'function') {
+      refreshLicenseClients()
+        .then(() => { render(); })
+        .catch((error) => showToast(error.message, 'err'));
+    }
+  });
+}
+
 logoutButton.addEventListener('click', async () => {
   await api('/api/logout', { method: 'POST', body: {} }).catch(() => {});
   clearActivity();
@@ -1648,6 +1728,7 @@ async function idleLogout() {
 async function boot() {
   watchIdle(idleLogout);
   if (await enforceAppUpdate()) return;
+  if (typeof enforceLicense === 'function' && await enforceLicense()) return;
   try {
     const status = await api('/api/status');
     state.needsSetup = status.needsSetup;

@@ -10,8 +10,9 @@ function renderWelcome() {
       <p class="help">Revendeurs : collez l’invitation envoyée par l’administration (WhatsApp, SMS…), puis entrez votre mot de passe.</p>
       <button class="btn-quiet btn-block" type="button" data-action="nouveau" ${busy ? 'disabled' : ''}>Première installation</button>
       <p class="help">Uniquement pour créer le tout premier administrateur sur un téléphone encore vide.</p>
+      ${typeof licenseAllowsDrive === 'function' && !licenseAllowsDrive() ? '' : `
       <button class="btn-quiet btn-block" type="button" data-action="restore" ${busy ? 'disabled' : ''}>Restaurer (admin / Gmail)</button>
-      <p class="help">Réservé à l’administration pour récupérer une copie Drive. Ne partagez pas ce Gmail aux revendeurs.</p>
+      <p class="help">Réservé à l’administration pour récupérer une copie Drive. Ne partagez pas ce Gmail aux revendeurs.</p>`}
     </section>
   `;
 }
@@ -33,48 +34,46 @@ function renderInvite() {
 
 function renderEnter(options = {}) {
   const setup = Boolean(options.setup);
+  const reset = Boolean(options.reset);
+  if (reset) {
+    app.innerHTML = `
+      <section class="card card-auth">
+        <h1>Mot de passe oublié</h1>
+        <p class="help">Contactez d’abord HORIZON TEAM. Quand la réinit est autorisée (24 h), le même nom et le même numéro qu’à l’abonnement suffisent.</p>
+        <form data-form="reset-admin">
+          <label>Nom et prénom</label>
+          <input name="clientName" required placeholder="Nom et prénom" autocomplete="name">
+          <label>Téléphone</label>
+          <input name="phone" required placeholder="Téléphone" inputmode="tel" autocomplete="tel">
+          <label>Nouveau mot de passe</label>
+          ${passwordField({ name: 'password', autocomplete: 'new-password', required: true, minlength: 8 })}
+          <label>Confirmer</label>
+          ${passwordField({ name: 'confirm', autocomplete: 'new-password', required: true, minlength: 8 })}
+          <button class="btn-sell btn-block" type="submit" ${busy ? 'disabled' : ''}>Enregistrer</button>
+        </form>
+        <button class="btn-quiet btn-block" type="button" data-action="enter" ${busy ? 'disabled' : ''}>Retour</button>
+      </section>
+    `;
+    return;
+  }
   app.innerHTML = `
     <section class="card card-auth">
       <h1>Tickets</h1>
       <p class="help">${setup
-        ? 'Mot de passe d’administration pour créer ce téléphone à zéro.'
+        ? 'Choisissez le mot de passe d’administration de ce téléphone (8 caractères minimum). Ne le partagez pas aux revendeurs.'
         : 'Mot de passe administration ou revendeur.'}</p>
       <form data-form="enter">
-        <label for="password">Mot de passe</label>
-        ${passwordField({ id: 'password', name: 'password', autocomplete: 'current-password', required: true })}
-        <button class="btn-sell btn-block" type="submit" ${busy ? 'disabled' : ''}>Entrer</button>
+        <label for="password">${setup ? 'Nouveau mot de passe' : 'Mot de passe'}</label>
+        ${passwordField({ id: 'password', name: 'password', autocomplete: setup ? 'new-password' : 'current-password', required: true, minlength: setup ? 8 : undefined })}
+        ${setup ? `
+        <label for="confirm">Confirmer</label>
+        ${passwordField({ id: 'confirm', name: 'confirm', autocomplete: 'new-password', required: true, minlength: 8 })}` : ''}
+        <button class="btn-sell btn-block" type="submit" ${busy ? 'disabled' : ''}>${setup ? 'Créer' : 'Entrer'}</button>
       </form>
       ${setup ? '' : `<button class="btn-quiet btn-block" type="button" data-action="reset-admin" ${busy ? 'disabled' : ''}>Mot de passe admin oublié</button>`}
       <button class="btn-quiet btn-block" type="button" data-action="welcome">Retour</button>
     </section>
   `;
-}
-
-async function resetAdminPasswordWithFactory() {
-  const factoryPassword = await showConfirm({
-    title: 'Réinitialiser le mot de passe admin ?',
-    text: 'Le mot de passe d’administration redeviendra le mot de passe d’usine. Les comptes revendeurs ne sont pas modifiés.',
-    passwordPrompt: 'Veuillez saisir le mot de passe d’usine pour réinitialiser',
-    confirmLabel: 'Réinitialiser',
-    danger: true,
-  });
-  if (factoryPassword == null) return;
-  busy = true;
-  renderEnter({ setup: false });
-  try {
-    await api('/api/admin/password/reset', {
-      method: 'POST',
-      body: { factoryPassword },
-    });
-    clearActivity();
-    clearOwner();
-    showToast('Mot de passe admin réinitialisé. Connectez-vous avec le mot de passe d’usine.', 'ok', 5000);
-  } catch (error) {
-    showToast(error.message || 'Réinitialisation impossible.', 'err', 4500);
-  } finally {
-    busy = false;
-    renderEnter({ setup: false });
-  }
 }
 
 function extractInviteToken(raw) {
@@ -122,7 +121,11 @@ app.addEventListener('click', async (event) => {
     return;
   }
   if (action === 'reset-admin') {
-    await resetAdminPasswordWithFactory();
+    renderEnter({ reset: true });
+    return;
+  }
+  if (action === 'enter') {
+    renderEnter({ setup: false });
     return;
   }
   if (action === 'nouveau') {
@@ -163,6 +166,15 @@ app.addEventListener('submit', async (event) => {
   if (button) button.disabled = true;
   busy = true;
   try {
+    if (form.dataset.form === 'reset-admin') {
+      await api('/api/admin/password/reset', { method: 'POST', body: data });
+      clearActivity();
+      clearOwner();
+      busy = false;
+      renderEnter({ setup: false });
+      showToast('Mot de passe enregistré. Connectez-vous avec le nouveau.', 'ok', 5000);
+      return;
+    }
     if (form.dataset.form === 'invite') {
       const token = extractInviteToken(data.token);
       const result = await api('/api/invite/accept', { method: 'POST', body: { token } });

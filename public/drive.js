@@ -291,6 +291,7 @@ function snapshotIsAdminBackup(snapshot) {
 }
 
 async function uploadDriveBackup() {
+  if (typeof licenseAllowsDrive === 'function' && !licenseAllowsDrive()) return 'forbidden';
   if (uploadDriveBackup.running) return 'busy';
   const account = readGoogleAccount();
   if (!account.refreshToken && !account.accessToken) return 'nolink';
@@ -348,6 +349,7 @@ async function uploadDriveBackup() {
 }
 
 function scheduleDriveBackup() {
+  if (typeof licenseAllowsDrive === 'function' && !licenseAllowsDrive()) return;
   if (scheduleDriveBackup.paused) return;
   const account = readGoogleAccount();
   if (!account.refreshToken && !account.accessToken) return;
@@ -397,6 +399,7 @@ async function finishOAuth() {
 }
 
 async function syncDriveNow(options = {}) {
+  if (typeof licenseAllowsDrive === 'function' && !licenseAllowsDrive()) return 'forbidden';
   const account = readGoogleAccount();
   if (!account.refreshToken && !account.accessToken) return 'nolink';
   if (syncDriveNow.running) return 'busy';

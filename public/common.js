@@ -115,8 +115,8 @@ function showAppBusy(message = 'Chargement…') {
   root.setAttribute('aria-busy', 'true');
 }
 
-function hideAppBusy() {
-  appBusyDepth = Math.max(0, appBusyDepth - 1);
+function hideAppBusy(force = false) {
+  appBusyDepth = force ? 0 : Math.max(0, appBusyDepth - 1);
   if (appBusyDepth > 0) return;
   const root = document.getElementById('app-busy');
   if (!root) return;
@@ -273,7 +273,7 @@ async function api(url, options = {}) {
   return localApi(url, options);
 }
 
-const APP_VERSION = '2.7';
+const APP_VERSION = '2.8';
 const UPDATE_REPO = 'bertheb39/OPUS';
 const activityKey = 'opus.activity';
 const currencyKey = 'opus.currency';
@@ -374,7 +374,12 @@ async function resolveLatestReleaseUpdate() {
   };
 }
 
-function showMandatoryUpdate(target) {
+function hideUpdateNotice() {
+  const overlay = document.getElementById('update-gate');
+  if (overlay) overlay.remove();
+}
+
+function showOptionalUpdate(target) {
   let overlay = document.getElementById('update-gate');
   if (!overlay) {
     overlay = document.createElement('div');
@@ -384,64 +389,54 @@ function showMandatoryUpdate(target) {
     overlay.setAttribute('aria-modal', 'true');
     document.body.appendChild(overlay);
   }
-  document.body.classList.add('update-locked');
   overlay.innerHTML = `
     <section class="update-gate-card">
-      <h1>Mise à jour obligatoire</h1>
-      <p>La version <strong>${esc(target.version)}</strong> est disponible.</p>
-      <p class="meta">Version installée : ${esc(APP_VERSION)}</p>
-      <p>Téléchargez et installez cette version pour continuer. L’application reste bloquée tant que la mise à jour n’est pas installée.</p>
-      <button type="button" class="btn-sell btn-block" data-update-download>Télécharger ${esc(target.fileName || 'la mise à jour')}</button>
-      <p class="help" data-update-hint hidden>Téléchargement lancé. Installez le fichier puis rouvrez Tickets.</p>
+      <p>Une nouvelle mise à jour est disponible Ticket Version ${esc(target.version)}</p>
+      <div class="actions update-gate-actions">
+        <button type="button" class="btn-sell" data-update-download>Mettre à jour</button>
+        <button type="button" class="btn-quiet" data-update-ignore>Ignorer</button>
+      </div>
     </section>
   `;
-  const button = overlay.querySelector('[data-update-download]');
-  const hint = overlay.querySelector('[data-update-hint]');
-  button.addEventListener('click', async () => {
+  overlay.querySelector('[data-update-download]').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
     button.disabled = true;
     try {
       await openExternal(target.downloadUrl);
-      if (hint) hint.hidden = false;
     } catch (error) {
       showToast(error.message || 'Téléchargement impossible.', 'err');
     } finally {
       button.disabled = false;
     }
   });
+  overlay.querySelector('[data-update-ignore]').addEventListener('click', () => {
+    sessionStorage.setItem('opus.updateIgnored', '1');
+    hideUpdateNotice();
+  });
 }
 
 function clearMandatoryUpdate() {
-  const overlay = document.getElementById('update-gate');
-  if (overlay) overlay.remove();
-  document.body.classList.remove('update-locked');
-  enforceAppUpdate.locked = false;
+  hideUpdateNotice();
 }
 
 async function enforceAppUpdate() {
+  if (sessionStorage.getItem('opus.updateIgnored') === '1') return false;
   let target = null;
   try {
     target = await resolveLatestReleaseUpdate();
   } catch {
-    return Boolean(enforceAppUpdate.locked);
-  }
-  if (!target || !target.version || !target.downloadUrl || !versionIsNewer(target.version, APP_VERSION)) {
-    clearMandatoryUpdate();
     return false;
   }
-  enforceAppUpdate.locked = true;
-  showMandatoryUpdate(target);
-  return true;
+  if (!target || !target.version || !target.downloadUrl || !versionIsNewer(target.version, APP_VERSION)) {
+    hideUpdateNotice();
+    return false;
+  }
+  showOptionalUpdate(target);
+  return false;
 }
 
 async function checkForUpdate() {
   return enforceAppUpdate();
-}
-
-if (!window.__opusUpdateWatchBound) {
-  window.__opusUpdateWatchBound = true;
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') enforceAppUpdate();
-  });
 }
 
 function readCurrency() {
@@ -602,30 +597,25 @@ async function showResellerInvite(invite) {
   const summary = meta
     ? `Ce code emporte : ${profiles} forfait${profiles > 1 ? 's' : ''} · ${lots} lot${lots > 1 ? 's' : ''}${pending ? ` (${pending} en cours)` : ''} · stock app ${stockTotal}.`
     : '';
-  // WhatsApp n’accepte qu’un partage à la fois : on envoie le guide, le code est déjà copié
-  // pour le coller comme 2ᵉ message dans le même chat, sans revenir dans Tickets.
-  const shareBody = [
-    guideText,
-    '',
-    '———',
-    'Ensuite, dans le même chat : appuyez longuement → Coller',
-    '(le code OPUS1… est déjà dans le presse-papiers)',
-  ].join('\n');
   if (!token) throw new Error('Invitation vide.');
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
     <section class="modal modal-form" role="dialog" aria-modal="true">
       <h2>Inviter ${esc(name)}</h2>
-      <p><strong>Partager</strong> ouvre WhatsApp une seule fois (guide). Le code est copié automatiquement : collez-le juste après dans le même chat.</p>
+      <p><strong>Deux messages</strong>, dans le même chat WhatsApp, dans cet ordre. Ne les mélangez pas.</p>
+      <p class="meta">1) Envoyez le guide. 2) Envoyez le code OPUS1 tout seul.</p>
       ${summary ? `<p class="meta">${esc(summary)}</p>` : ''}
       ${meta && lots === 0 && stockTotal === 0 ? '<p class="meta">Aucun lot ni stock dans ce code : attribuez d’abord des lots (ou ajoutez du stock), puis renvoyez l’invitation.</p>' : ''}
-      <label>Aperçu — message partagé (guide)</label>
-      <textarea class="invite-share" readonly rows="6">${esc(shareBody)}</textarea>
-      <label>Code (copié au partage — 2ᵉ message à coller)</label>
+      <label>Message 1 — Guide</label>
+      <textarea class="invite-share" readonly rows="8">${esc(guideText)}</textarea>
+      <label>Message 2 — Code (OPUS1 seul)</label>
       <textarea class="invite-share invite-code" readonly rows="3">${esc(token)}</textarea>
       <div class="modal-actions">
-        <button type="button" class="btn-sell" data-share>Partager</button>
+        <button type="button" class="btn-sell" data-share-both>Partager les 2 messages</button>
+        <button type="button" class="btn-quiet" data-share-guide>Partager le guide</button>
+        <button type="button" class="btn-quiet" data-copy-guide>Copier le guide</button>
+        <button type="button" class="btn-quiet" data-share-code>Partager le code</button>
         <button type="button" class="btn-quiet" data-copy-code>Copier le code</button>
         <button type="button" class="btn-quiet" data-ok>Fermer</button>
       </div>
@@ -636,6 +626,14 @@ async function showResellerInvite(invite) {
     if (event.target === overlay) close();
   });
   overlay.querySelector('[data-ok]').addEventListener('click', close);
+  overlay.querySelector('[data-copy-guide]').addEventListener('click', async () => {
+    try {
+      await copyPlainText(guideText);
+      showToast('Guide copié.', 'ok');
+    } catch (error) {
+      showToast(error.message || 'Copie impossible.', 'err');
+    }
+  });
   overlay.querySelector('[data-copy-code]').addEventListener('click', async () => {
     try {
       await copyPlainText(token);
@@ -644,13 +642,40 @@ async function showResellerInvite(invite) {
       showToast(error.message || 'Copie impossible.', 'err');
     }
   });
-  overlay.querySelector('[data-share]').addEventListener('click', async () => {
-    const button = overlay.querySelector('[data-share]');
+  const shareOne = async (text, title, okMessage) => {
+    await sharePlainText(text, title);
+    showToast(okMessage, 'ok', 4000);
+  };
+  overlay.querySelector('[data-share-guide]').addEventListener('click', async () => {
+    const button = overlay.querySelector('[data-share-guide]');
     button.disabled = true;
     try {
-      await copyPlainText(token);
-      await sharePlainText(shareBody, `Tickets — ${name}`);
-      showToast('Guide envoyé. Collez le code (déjà copié) comme 2ᵉ message.', 'ok', 4500);
+      await shareOne(guideText, `Tickets — guide ${name}`, 'Message 1 envoyé. Envoyez ensuite le code.');
+    } catch (error) {
+      if (error && error.name === 'AbortError') return;
+      showToast(error.message || 'Partage impossible.', 'err');
+    } finally {
+      button.disabled = false;
+    }
+  });
+  overlay.querySelector('[data-share-code]').addEventListener('click', async () => {
+    const button = overlay.querySelector('[data-share-code]');
+    button.disabled = true;
+    try {
+      await shareOne(token, `Tickets — code ${name}`, 'Message 2 (code) envoyé.');
+    } catch (error) {
+      if (error && error.name === 'AbortError') return;
+      showToast(error.message || 'Partage impossible.', 'err');
+    } finally {
+      button.disabled = false;
+    }
+  });
+  overlay.querySelector('[data-share-both]').addEventListener('click', async () => {
+    const button = overlay.querySelector('[data-share-both]');
+    button.disabled = true;
+    try {
+      await sharePlainTexts([guideText, token], `Tickets — ${name}`);
+      showToast('Deux partages : d’abord le guide, puis le code, dans le même chat.', 'ok', 5000);
     } catch (error) {
       if (error && error.name === 'AbortError') return;
       showToast(error.message || 'Partage impossible.', 'err');

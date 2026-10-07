@@ -668,22 +668,18 @@ function hexToBytes(hex) {
   return bytes;
 }
 
-const OWNER_SALT = 'bb5717dee10be569d6fbd37dcff97cbc';
-const OWNER_HASH = 'fdf6da3a3461aee51d1ed539f9acc8af86499e0f0af8f33b357aafcb98a6be51';
-
-async function ownerPasswordMatches(password) {
-  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(String(password || '')), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({
-    name: 'PBKDF2',
-    salt: hexToBytes(OWNER_SALT),
-    iterations: 120000,
-    hash: 'SHA-256',
-  }, key, 256);
-  const actual = bytesToHex(new Uint8Array(bits));
-  if (actual.length !== OWNER_HASH.length) return false;
-  let diff = 0;
-  for (let i = 0; i < actual.length; i += 1) diff |= actual.charCodeAt(i) ^ OWNER_HASH.charCodeAt(i);
-  return diff === 0;
+async function createFirstAdmin(password, confirm) {
+  const next = String(password || '');
+  const passwordError = validatePassword(next, 8);
+  if (passwordError) return { error: passwordError };
+  if (next !== String(confirm || '')) return { error: 'Les deux mots de passe ne correspondent pas.' };
+  const id = await putOne('admins', {
+    username: 'admin',
+    password_hash: await hashPassword(next),
+    created_at: new Date().toISOString(),
+  });
+  writeSession({ type: 'admin', id });
+  return { id };
 }
 
 async function hashPassword(password) {
@@ -901,9 +897,15 @@ async function transformBytes(bytes, TransformStreamCtor, format) {
 async function encodeInviteToken(pack) {
   const json = new TextEncoder().encode(JSON.stringify(pack));
   // Gzip seulement si ça réduit vraiment — via WritableStream (pas Blob.stream).
+  // Un CompressionStream bloqué (WebView) faisait tourner « Inviter » sans fin.
   if (typeof CompressionStream === 'function' && json.length > 1500) {
     try {
-      const compressed = await transformBytes(json, CompressionStream, 'gzip');
+      const compressed = await Promise.race([
+        transformBytes(json, CompressionStream, 'gzip'),
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('gzip-timeout')), 1500);
+        }),
+      ]);
       if (compressed.length + 20 < json.length) {
         return `OPUS1.gz.${bytesToBase64Url(compressed)}`;
       }
@@ -1037,16 +1039,28 @@ async function buildResellerInvite(resellerId) {
     // Volontairement absents du code WhatsApp :
     // - admins / autres revendeurs (sécurité)
     // - sales (historique) : trop volumineux ; resynchronisé depuis le routeur (scripts HAP)
+    license: (() => {
+      const snap = (typeof workspaceLicenseSnapshot === 'function' && workspaceLicenseSnapshot())
+        || null;
+      const workspaceId = (snap && snap.workspaceId)
+        || (typeof licenseWorkspaceId === 'function' && licenseWorkspaceId())
+        || '';
+      return { ...(snap || {}), workspaceId };
+    })(),
   };
 
   const token = await encodeInviteToken(pack);
   const guideText = [
-    `Tickets — invitation ${reseller.hmp_name}`,
+    `Tickets — invitation pour ${reseller.hmp_name}`,
     '',
-    '1) Ouvrez Tickets',
-    '2) Touchez « Rejoindre avec un code »',
-    '3) Collez uniquement le code OPUS1… (2ᵉ message, ou presse-papiers)',
-    '4) Validez, puis entrez votre mot de passe revendeur',
+    'Message 1 / 2 — à lire avant le code.',
+    '',
+    '1) Ouvrez Tickets sur ce téléphone.',
+    '2) Touchez « Rejoindre avec un code ».',
+    '3) Collez uniquement le message suivant (il commence par OPUS1).',
+    '4) Validez, puis entrez le mot de passe revendeur.',
+    '',
+    'N’utilisez pas « Première installation ».',
   ].join('\n');
   return {
     token,
@@ -1144,6 +1158,22 @@ async function importResellerInvite(token) {
       reseller_id: resellerId,
       at: row.at || new Date().toISOString(),
     });
+  }
+  if (pack.license && pack.license.workspaceId && typeof localStorage !== 'undefined') {
+    localStorage.setItem('opus.workspaceId', pack.license.workspaceId);
+  }
+  if (pack.license && pack.license.code) {
+    await putOne('settings', {
+      id: 'workspace-license',
+      code: pack.license.code,
+      clientName: pack.license.clientName || '',
+      plan: pack.license.plan || '',
+      status: pack.license.status || '',
+      endsAt: pack.license.endsAt || '',
+      workspaceId: pack.license.workspaceId || '',
+      checkedAt: Date.now(),
+    });
+    if (typeof rememberWorkspaceLicense === 'function') rememberWorkspaceLicense(pack.license);
   }
   const currency = String(pack.currency || '');
   if (['XOF', 'CDF', 'EUR', 'USD'].includes(currency)) localStorage.setItem('opus.currency', currency);
@@ -1343,6 +1373,20 @@ async function resellerView(reseller, month) {
   };
 }
 
+function licenseOpsFrozen() {
+  return typeof licenseBlocksLiveOps === 'function' && licenseBlocksLiveOps();
+}
+
+function licenseFrozenMessage() {
+  return typeof licenseLiveOpsMessage === 'function'
+    ? licenseLiveOpsMessage()
+    : 'Abonnement terminé.';
+}
+
+function licenseFrozenFail() {
+  return fail(403, licenseFrozenMessage());
+}
+
 function routerPlugin() {
   return window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.RouterOs;
 }
@@ -1409,6 +1453,11 @@ function routerAttemptBudget(index, hostCount, fullTimeout) {
 }
 
 async function routerRun(router, commands, timeoutMs) {
+  if (licenseOpsFrozen()) {
+    const error = new Error(licenseFrozenMessage());
+    error.code = 'LICENSE';
+    throw error;
+  }
   const hosts = routerHosts(router);
   if (!hosts.length) {
     const error = new Error('Adresse du routeur manquante.');
@@ -1630,6 +1679,7 @@ function ticketConsumed(row) {
  * - Sinon : ajoute les nouveaux tickets des mêmes commentaires déjà attribués.
  */
 async function syncResellerAssignedFromRouter(reseller) {
+  if (licenseOpsFrozen()) return { added: 0 };
   const resellerId = Number(reseller && reseller.id) || 0;
   const cached = assignedSyncCache.get(resellerId);
   if (cached && cached.expires > Date.now()) return cached.result || { added: 0 };
@@ -1896,6 +1946,9 @@ function ticketResponse(router, ticket, profile, whenIso) {
 }
 
 async function syncHapSales({ resellerId = 0, routerId = 0, from = '', to = '', force = false } = {}) {
+  if (licenseOpsFrozen()) {
+    return { warning: licenseFrozenMessage(), created: 0, removed: 0, read: 0 };
+  }
   const windowFrom = from || `${currentMonthKey()}-01`;
   const windowTo = to || localDateISO(new Date());
   const cacheKey = syncSalesCacheKey({ resellerId, routerId, from: windowFrom, to: windowTo });
@@ -2390,6 +2443,27 @@ async function handle(method, url, body) {
     });
   }
 
+  if (method === 'GET' && path === '/api/settings/license') {
+    const row = await getOne('settings', 'workspace-license');
+    return ok(row || null);
+  }
+
+  if (method === 'PUT' && path === '/api/settings/license') {
+    const row = {
+      id: 'workspace-license',
+      code: String(body.code || '').trim(),
+      clientName: String(body.clientName || '').trim(),
+      plan: String(body.plan || '').trim(),
+      status: String(body.status || '').trim(),
+      endsAt: String(body.endsAt || '').trim(),
+      workspaceId: String(body.workspaceId || '').trim(),
+      checkedAt: Date.now(),
+    };
+    if (!row.code) return fail(400, 'Code licence manquant.');
+    await putOne('settings', row);
+    return ok(row);
+  }
+
   if (method === 'POST' && path === '/api/invite/accept') {
     try {
       const result = await importResellerInvite(body.token || body.code || '');
@@ -2409,17 +2483,12 @@ async function handle(method, url, body) {
     const admins = await getAll('admins');
     const resellers = await getAll('resellers');
     if (admins.length === 0 && resellers.length === 0) {
-      if (!(await ownerPasswordMatches(password))) {
+      const created = await createFirstAdmin(password, body.confirm);
+      if (created.error) {
         markAttempt('enter', false);
-        return fail(401, 'Aucun compte sur cet appareil. Les revendeurs doivent d’abord « Rejoindre avec un code », puis entrer leur mot de passe.');
+        return fail(400, created.error);
       }
-      const id = await putOne('admins', {
-        username: 'admin',
-        password_hash: await hashPassword(password),
-        created_at: new Date().toISOString(),
-      });
       markAttempt('enter', true);
-      writeSession({ type: 'admin', id });
       return ok({ role: 'admin' });
     }
     for (const candidate of admins) {
@@ -2445,7 +2514,12 @@ async function handle(method, url, body) {
   }
 
   if (method === 'POST' && path === '/api/setup') {
-    return fail(403, 'Mot de passe incorrect.');
+    const admins = await getAll('admins');
+    const resellers = await getAll('resellers');
+    if (admins.length || resellers.length) return fail(403, 'Le compte administrateur existe déjà.');
+    const created = await createFirstAdmin(body.password, body.confirm);
+    if (created.error) return fail(400, created.error);
+    return ok({ ok: true, role: 'admin' });
   }
 
   if (method === 'POST' && path === '/api/admin/login') {
@@ -2488,25 +2562,51 @@ async function handle(method, url, body) {
     return ok({ ok: true });
   }
 
-  // Réinitialisation admin via mot de passe d’usine — accessible sans session.
   if (method === 'POST' && path === '/api/admin/password/reset') {
     if (tooManyAttempts('admin-reset')) {
       return fail(429, 'Trop de tentatives. Réessayez dans une minute.');
     }
-    const factoryPassword = String(body.factoryPassword || body.password || '');
     const admins = await getAll('admins');
     if (!admins.length) {
       markAttempt('admin-reset', false);
       return fail(400, 'Aucun compte admin sur cet appareil.');
     }
-    if (!(await ownerPasswordMatches(factoryPassword))) {
+    const next = String(body.password || body.newPassword || '');
+    const confirm = String(body.confirm || body.confirmPassword || '');
+    const passwordError = validatePassword(next, 8);
+    if (passwordError) {
       markAttempt('admin-reset', false);
-      return fail(401, 'Mot de passe d’usine incorrect.');
+      return fail(400, passwordError);
     }
-    const factoryHash = await hashPassword(factoryPassword);
+    if (next !== confirm) {
+      markAttempt('admin-reset', false);
+      return fail(400, 'Les deux mots de passe ne correspondent pas.');
+    }
+    if (await passwordAlreadyUsed(next)) {
+      markAttempt('admin-reset', false);
+      return fail(400, 'Ce mot de passe est déjà utilisé par un revendeur.');
+    }
+    if (typeof consumeAuthorizedPasswordReset !== 'function') {
+      markAttempt('admin-reset', false);
+      return fail(400, 'Réinitialisation indisponible. Contactez HORIZON TEAM.');
+    }
+    let allowed;
+    try {
+      allowed = await consumeAuthorizedPasswordReset({
+        clientName: String(body.clientName || '').trim(),
+        phone: String(body.phone || '').trim(),
+      });
+    } catch (error) {
+      markAttempt('admin-reset', false);
+      return fail(403, error.message || 'Réinitialisation non autorisée.');
+    }
+    const hash = await hashPassword(next);
     for (const row of admins) {
-      row.password_hash = factoryHash;
+      row.password_hash = hash;
       await putOne('admins', row);
+    }
+    if (typeof markPasswordResetUsed === 'function' && allowed?.code) {
+      await markPasswordResetUsed(allowed.code, allowed.until);
     }
     markAttempt('admin-reset', true);
     writeSession(null);
@@ -2518,6 +2618,13 @@ async function handle(method, url, body) {
 
   if (path.startsWith('/api/admin') && !admin) return fail(401, 'Connexion requise.');
   if (path.startsWith('/api/vendeur') && !resellerSession) return fail(401, 'Connexion requise.');
+
+  if (licenseOpsFrozen() && method !== 'GET') {
+    const allowedWhenFrozen = new Set(['/api/logout', '/api/settings/license', '/api/admin/password']);
+    if (!allowedWhenFrozen.has(path) && (path.startsWith('/api/admin') || path.startsWith('/api/vendeur'))) {
+      return licenseFrozenFail();
+    }
+  }
 
   if (method === 'GET' && path === '/api/admin/me') {
     const row = await getOne('admins', admin.id);
@@ -2580,6 +2687,13 @@ async function handle(method, url, body) {
       return fail(400, 'Le port API doit être entre 1 et 65535.');
     }
     if (!username || !password) return fail(400, 'Indiquez l\'utilisateur API et son mot de passe.');
+    if (typeof licenseRights === 'function') {
+      const rights = licenseRights();
+      const existing = await getAll('routers');
+      if (existing.length >= rights.maxRouters) {
+        return fail(400, `Votre offre autorise ${rights.maxRouters} routeur(s). Passez à une offre supérieure.`);
+      }
+    }
     const id = await putOne('routers', {
       name,
       host,
@@ -2733,6 +2847,17 @@ async function handle(method, url, body) {
     if (!router) return fail(400, 'Choisissez le routeur.');
     if (host && host.length > 253) return fail(400, 'Adresse du revendeur trop longue.');
     if (await passwordAlreadyUsed(password)) return fail(400, 'Ce mot de passe est déjà utilisé.');
+    if (typeof licenseRights === 'function') {
+      const rights = licenseRights();
+      const all = await getAll('resellers');
+      if (all.length >= rights.maxResellers) {
+        return fail(400, `Votre offre autorise ${rights.maxResellers} revendeur(s).`);
+      }
+      const onRouter = all.filter((item) => Number(item.router_id) === routerId).length;
+      if (onRouter >= rights.maxResellersPerRouter) {
+        return fail(400, `Votre offre autorise ${rights.maxResellersPerRouter} revendeur(s) sur ce routeur.`);
+      }
+    }
     const ratePercent = parseRatePercent(body.ratePercent);
     if (body.ratePercent !== '' && body.ratePercent != null && ratePercent == null) {
       return fail(400, 'Le taux doit être un pourcentage entre 0 et 100.');
@@ -2786,7 +2911,19 @@ async function handle(method, url, body) {
     if (Object.prototype.hasOwnProperty.call(body, 'routerId')) {
       const routerId = Number(body.routerId);
       if (!(await getOne('routers', routerId))) return fail(400, 'Choisissez le routeur.');
-      if (Number(current.router_id) !== routerId) identityChanged = true;
+      if (Number(current.router_id) !== routerId) {
+        if (typeof licenseRights === 'function') {
+          const rights = licenseRights();
+          const all = await getAll('resellers');
+          const onRouter = all.filter((item) => (
+            Number(item.router_id) === routerId && Number(item.id) !== Number(current.id)
+          )).length;
+          if (onRouter >= rights.maxResellersPerRouter) {
+            return fail(400, `Votre offre autorise ${rights.maxResellersPerRouter} revendeur(s) sur ce routeur.`);
+          }
+        }
+        identityChanged = true;
+      }
       current.router_id = routerId;
     }
     if (Object.prototype.hasOwnProperty.call(body, 'host') || Object.prototype.hasOwnProperty.call(body, 'reachHost')) {

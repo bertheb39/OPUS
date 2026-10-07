@@ -79,6 +79,18 @@ function sellRows() {
   return rows;
 }
 
+function holdBanner() {
+  if (typeof licenseBlocksLiveOps !== 'function' || !licenseBlocksLiveOps()) return '';
+  if (typeof licenseHoldBannerHtml === 'function') {
+    return licenseHoldBannerHtml(isOwner() ? 'owner' : 'reseller');
+  }
+  return '';
+}
+
+function salesFrozen() {
+  return typeof licenseBlocksLiveOps === 'function' && licenseBlocksLiveOps();
+}
+
 function renderSellCard(row) {
   const forfait = row.forfait;
   const lot = row.lot;
@@ -106,8 +118,8 @@ function renderSellCard(row) {
           type="button"
           data-action="sell-lot"
           data-profile="${esc(name)}"
-          ${!lotReady || state.busy ? 'disabled' : ''}
-        >${lotReady ? 'Remettre' : 'Prix manquant'}</button>
+          ${!lotReady || state.busy || salesFrozen() ? 'disabled' : ''}
+        >${salesFrozen() ? 'Vente coupée' : (lotReady ? 'Remettre' : 'Prix manquant')}</button>
       </article>
     `;
   }
@@ -127,8 +139,8 @@ function renderSellCard(row) {
         type="button"
         data-action="choose"
         data-id="${forfait.id}"
-        ${stock < 1 || state.busy ? 'disabled' : ''}
-      >${stock < 1 ? 'Stock épuisé' : 'Remettre'}</button>
+        ${stock < 1 || state.busy || salesFrozen() ? 'disabled' : ''}
+      >${salesFrozen() ? 'Vente coupée' : (stock < 1 ? 'Stock épuisé' : 'Remettre')}</button>
     </article>
   `;
 }
@@ -151,12 +163,13 @@ function renderList() {
   `).join('');
   app.innerHTML = `
     <div class="sheet">
+      ${holdBanner()}
       <p class="meta">${esc(state.me.name)} · ${esc(state.me.routerName)}</p>
       <section class="card">
         <h2>Retrouver un ticket</h2>
         <form data-form="verifier" class="field-row">
           <input id="verify-code" name="code" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="text" placeholder="Code" aria-label="Code">
-          <button type="submit" ${state.busy ? 'disabled' : ''}>OK</button>
+          <button type="submit" ${state.busy || salesFrozen() ? 'disabled' : ''}>OK</button>
         </form>
       </section>
       ${pendingCards ? `
@@ -252,6 +265,7 @@ function renderHistory() {
     : 'À reverser';
   app.innerHTML = `
     <div class="sheet">
+    ${holdBanner()}
     <div class="stat-grid">
       ${statCard("Aujourd'hui", report ? report.today.count : null, report ? report.today.amount : null, { period: 'today', selected: kind === 'today' })}
       ${statCard('Ce mois', report ? report.month.count : null, report ? report.month.amount : null, { period: 'month', selected: kind === 'month' })}
@@ -295,6 +309,7 @@ function renderActifs() {
   const clock = state.actifs?.at ? formatClock(state.actifs.at) : '';
   app.innerHTML = `
     <div class="sheet">
+    ${holdBanner()}
     <section class="card">
       <div class="actifs-head">
         <h2>Actifs</h2>
@@ -528,6 +543,10 @@ app.addEventListener('click', async (event) => {
     return;
   }
   if (action === 'choose') {
+    if (salesFrozen()) {
+      showToast(typeof licenseLiveOpsMessage === 'function' ? licenseLiveOpsMessage() : 'Vente coupée.', 'err');
+      return;
+    }
     const forfait = state.forfaits.find((item) => item.id === Number(button.dataset.id));
     if (!forfait) return;
     const agreed = await showConfirm({
@@ -559,6 +578,10 @@ app.addEventListener('click', async (event) => {
     return;
   }
   if (action === 'sell-lot') {
+    if (salesFrozen()) {
+      showToast(typeof licenseLiveOpsMessage === 'function' ? licenseLiveOpsMessage() : 'Vente coupée.', 'err');
+      return;
+    }
     const lot = state.lots.find((item) => item.profile === button.dataset.profile);
     if (!lot || !lot.ready) return;
     const agreed = await showConfirm({
@@ -694,6 +717,9 @@ async function idleLogout() {
 async function boot() {
   watchIdle(idleLogout);
   if (await enforceAppUpdate()) return;
+  if (typeof hydrateWorkspaceLicense === 'function') {
+    await hydrateWorkspaceLicense().catch(() => {});
+  }
   render();
   try {
     if (activityExpired()) {
@@ -712,8 +738,11 @@ async function boot() {
     await loadForfaits();
     markActivity();
     idleLogout.done = false;
-  } catch {
+  } catch (error) {
     state.authed = false;
+    if (error?.message && !/Failed to fetch|NetworkError/i.test(error.message)) {
+      showToast(error.message, 'err', 7000);
+    }
   } finally {
     state.busy = false;
     hideAppBusy();

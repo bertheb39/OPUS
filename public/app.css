@@ -99,6 +99,21 @@ header .header-link {
   font-size: 12px;
 }
 
+header #to-clients[hidden] {
+  display: none !important;
+}
+
+header #to-clients:not(.is-current) {
+  background: transparent;
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+}
+
+header #to-clients.is-current {
+  background: white;
+  color: var(--brand-dark);
+}
+
 .header-actions {
   display: flex;
   align-items: center;
@@ -106,6 +121,45 @@ header .header-link {
   flex: 0 0 auto;
   flex-wrap: nowrap;
   gap: 6px;
+}
+
+.license-badge {
+  max-width: 42vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(255, 224, 48, 0.18);
+  color: #ffe030;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.license-badge.is-warn {
+  border-color: rgba(255, 176, 32, 0.55);
+  background: rgba(180, 70, 10, 0.35);
+  color: #ffd28a;
+}
+
+.license-expiry-banner {
+  border-color: #e8b86d;
+  background: #fff8ee;
+}
+
+.license-expiry-banner .btn-sell {
+  margin-top: 8px;
+}
+
+.license-status-card .license-remaining {
+  margin: 4px 0 10px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.license-status-card.is-expired .license-remaining {
+  color: #b42318;
 }
 
 .header-scope {
@@ -502,7 +556,7 @@ button:disabled { opacity: 0.55; cursor: default; }
 
 #toast-root {
   position: fixed;
-  z-index: 80;
+  z-index: 10050;
   inset: 0;
   display: flex;
   align-items: center;
@@ -550,14 +604,80 @@ button:disabled { opacity: 0.55; cursor: default; }
 }
 
 .update-gate-card p {
+  margin: 0 0 14px;
+}
+
+.update-gate-actions {
+  justify-content: center;
+}
+
+.license-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(10, 24, 40, 0.92);
+}
+
+.license-gate-card {
+  width: min(420px, 100%);
+  max-height: 90vh;
+  overflow: auto;
+  background: var(--card, #fff);
+  border-radius: 16px;
+  padding: 20px 16px;
+  box-shadow: var(--shadow);
+}
+
+.license-offers {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.license-offer {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  margin: 0;
+  padding: 10px 12px;
+  text-align: left;
+  background: #f4f7fb;
+  color: inherit;
+  border: 1px solid #d5deea;
+}
+
+.license-offer.is-on {
+  border-color: var(--brand-dark, #12324f);
+  background: #e8eef6;
+}
+
+.license-request {
+  margin: 0 0 14px;
+}
+
+.license-gate-card h1 {
+  margin-bottom: 10px;
+}
+
+.license-gate-card p {
   margin: 0 0 10px;
 }
 
-body.update-locked {
+.license-gate-card .btn-block {
+  width: 100%;
+}
+
+body.license-locked {
   overflow: hidden;
 }
 
-body.update-locked > *:not(#update-gate) {
+body.license-locked > *:not(#license-gate) {
   pointer-events: none;
   user-select: none;
 }
@@ -571,6 +691,74 @@ body.update-locked > *:not(#update-gate) {
   justify-content: center;
   padding: 20px;
   background: rgba(16, 28, 40, 0.48);
+}
+
+#subscription-modal.modal-overlay {
+  z-index: 10020;
+  align-items: flex-end;
+  padding: 10px 10px calc(10px + env(safe-area-inset-bottom, 0px));
+}
+
+#subscription-modal .modal {
+  width: min(420px, 100%);
+  max-height: min(88dvh, 640px);
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  text-align: left;
+  padding: 16px 14px 12px;
+  border-radius: 18px 18px 12px 12px;
+}
+
+#subscription-modal .license-offers {
+  margin-bottom: 8px;
+}
+
+#subscription-modal .license-offer {
+  padding: 8px 10px;
+}
+
+#subscription-modal .license-periods {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+
+#subscription-modal .license-period {
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid #c5d0da;
+  background: #f4f7fa;
+  color: var(--ink);
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+#subscription-modal .license-period.is-on {
+  border-color: #163a5c;
+  background: #163a5c;
+  color: #fff;
+}
+
+#subscription-modal .modal-actions {
+  grid-template-columns: 1fr;
+  position: sticky;
+  bottom: 0;
+  background: white;
+  padding-top: 4px;
+}
+
+@media (min-width: 640px) {
+  #subscription-modal.modal-overlay {
+    align-items: center;
+    padding: 24px;
+  }
+
+  #subscription-modal .modal {
+    border-radius: 22px;
+    max-height: min(80vh, 640px);
+  }
 }
 
 .modal {
