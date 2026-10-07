@@ -273,7 +273,7 @@ async function api(url, options = {}) {
   return localApi(url, options);
 }
 
-const APP_VERSION = '2.8.1';
+const APP_VERSION = '2.8.2';
 const UPDATE_REPO = 'bertheb39/OPUS';
 const activityKey = 'opus.activity';
 const currencyKey = 'opus.currency';
@@ -374,12 +374,7 @@ async function resolveLatestReleaseUpdate() {
   };
 }
 
-function hideUpdateNotice() {
-  const overlay = document.getElementById('update-gate');
-  if (overlay) overlay.remove();
-}
-
-function showOptionalUpdate(target) {
+function showMandatoryUpdate(target) {
   let overlay = document.getElementById('update-gate');
   if (!overlay) {
     overlay = document.createElement('div');
@@ -389,54 +384,64 @@ function showOptionalUpdate(target) {
     overlay.setAttribute('aria-modal', 'true');
     document.body.appendChild(overlay);
   }
+  document.body.classList.add('update-locked');
   overlay.innerHTML = `
     <section class="update-gate-card">
+      <h1>Mise à jour obligatoire</h1>
       <p>Une nouvelle mise à jour est disponible Ticket Version ${esc(target.version)}</p>
-      <div class="actions update-gate-actions">
-        <button type="button" class="btn-sell" data-update-download>Mettre à jour</button>
-        <button type="button" class="btn-quiet" data-update-ignore>Ignorer</button>
-      </div>
+      <p class="meta">Version installée : ${esc(APP_VERSION)}</p>
+      <p>Installez cette version pour continuer. L’application reste bloquée tant que la mise à jour n’est pas installée.</p>
+      <button type="button" class="btn-sell btn-block" data-update-download>Mettre à jour</button>
+      <p class="help" data-update-hint hidden>Téléchargement lancé. Installez le fichier puis rouvrez Tickets.</p>
     </section>
   `;
-  overlay.querySelector('[data-update-download]').addEventListener('click', async (event) => {
-    const button = event.currentTarget;
+  const button = overlay.querySelector('[data-update-download]');
+  const hint = overlay.querySelector('[data-update-hint]');
+  button.addEventListener('click', async () => {
     button.disabled = true;
     try {
       await openExternal(target.downloadUrl);
+      if (hint) hint.hidden = false;
     } catch (error) {
       showToast(error.message || 'Téléchargement impossible.', 'err');
     } finally {
       button.disabled = false;
     }
   });
-  overlay.querySelector('[data-update-ignore]').addEventListener('click', () => {
-    sessionStorage.setItem('opus.updateIgnored', '1');
-    hideUpdateNotice();
-  });
 }
 
 function clearMandatoryUpdate() {
-  hideUpdateNotice();
+  const overlay = document.getElementById('update-gate');
+  if (overlay) overlay.remove();
+  document.body.classList.remove('update-locked');
+  enforceAppUpdate.locked = false;
 }
 
 async function enforceAppUpdate() {
-  if (sessionStorage.getItem('opus.updateIgnored') === '1') return false;
   let target = null;
   try {
     target = await resolveLatestReleaseUpdate();
   } catch {
-    return false;
+    return Boolean(enforceAppUpdate.locked);
   }
   if (!target || !target.version || !target.downloadUrl || !versionIsNewer(target.version, APP_VERSION)) {
-    hideUpdateNotice();
+    clearMandatoryUpdate();
     return false;
   }
-  showOptionalUpdate(target);
-  return false;
+  enforceAppUpdate.locked = true;
+  showMandatoryUpdate(target);
+  return true;
 }
 
 async function checkForUpdate() {
   return enforceAppUpdate();
+}
+
+if (!window.__opusUpdateWatchBound) {
+  window.__opusUpdateWatchBound = true;
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') enforceAppUpdate();
+  });
 }
 
 function readCurrency() {
