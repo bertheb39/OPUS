@@ -30,6 +30,7 @@ const state = {
   sales: null,
   recettes: null,
   recettesView: 'resellers',
+  moneySyncing: false,
   licenseClients: [],
   licensePlans: [],
   licenseRequests: [],
@@ -689,6 +690,7 @@ function renderSales() {
         <div class="report-line"><span>Remis en attente<span class="report-tickets">${esc(pending?.count || 0)} ticket${(pending?.count || 0) === 1 ? '' : 's'}</span></span><strong>${esc(money(pending?.amount || 0))}</strong></div>
       ` : ''}
       ${sales?.syncWarning ? `<p class="meta">${esc(sales.syncWarning)}</p>` : ''}
+      ${state.moneySyncing ? '<p class="meta">Mise à jour depuis le routeur…</p>' : ''}
       ${rows || '<p class="meta">Aucune connexion sur cette période.</p>'}
     </section>
   `;
@@ -810,6 +812,7 @@ function renderRecettes() {
         <button type="submit">Actualiser</button>
       </form>
       ${data?.syncWarning ? `<p class="meta">${esc(data.syncWarning)}</p>` : ''}
+      ${state.moneySyncing ? '<p class="meta">Mise à jour depuis le routeur…</p>' : ''}
     </section>
 
     ${period ? `
@@ -926,8 +929,11 @@ async function loadWorkspace(options = {}) {
   const routers = await api('/api/admin/routers');
   state.routers = routers.routers || [];
   syncScopeFromRouters();
-  if (typeof loadPublicPlans === 'function') {
-    try { state.licensePlans = await loadPublicPlans(); } catch { /* catalogue local */ }
+  if (typeof loadPublicPlans === 'function' && !state.licensePlansLoaded) {
+    state.licensePlansLoaded = true;
+    loadPublicPlans().then((plans) => {
+      state.licensePlans = plans;
+    }).catch(() => {});
   }
   if (state.loading) {
     state.loading = false;
@@ -954,7 +960,7 @@ async function loadWorkspace(options = {}) {
     }),
   ];
   // Sur Recettes : pas besoin de recharger toute la liste Rapport (sync déjà dans recettes).
-  if (state.tab !== 'recettes' || !state.sales) {
+  if (state.tab === 'sales') {
     jobs.push(
       api(salesUrl).then((sales) => {
         state.sales = sales;
@@ -992,6 +998,47 @@ async function loadRecettes(options = {}) {
     state.salesFrom = data.period.from;
     state.salesTo = data.period.to;
   }
+}
+
+let moneySyncToken = 0;
+
+function refreshMoneyView() {
+  const token = ++moneySyncToken;
+  const tab = state.tab;
+  state.moneySyncing = true;
+  render();
+  loadWorkspace({ light: true })
+    .then(() => {
+      if (token !== moneySyncToken || state.tab !== tab) return null;
+      render();
+      if (tab === 'recettes') return loadRecettes({ sync: true });
+      return api(`/api/admin/sales?${salesQuery()}&sync=1`).then((sales) => {
+        if (token !== moneySyncToken || state.tab !== 'sales') return;
+        state.sales = sales;
+        state.salesFrom = sales.period.from;
+        state.salesTo = sales.period.to;
+        state.usage = {};
+        loadUsage();
+      });
+    })
+    .catch((error) => {
+      if (token === moneySyncToken) showToast(error.message, 'err');
+    })
+    .finally(() => {
+      if (token !== moneySyncToken) return;
+      state.moneySyncing = false;
+      if (state.tab === 'sales' || state.tab === 'recettes') render();
+    });
+}
+
+function prefetchSales() {
+  api('/api/admin/sales?sync=1').then((sales) => {
+    if (!state.sales) state.sales = sales;
+    if (state.tab === 'sales' && !state.moneySyncing) {
+      state.sales = sales;
+      render();
+    }
+  }).catch(() => {});
 }
 
 async function warmWorkspaceInBackground() {
@@ -1296,7 +1343,7 @@ app.addEventListener('submit', async (event) => {
       state.periodKind = '';
       state.salesRouterId = state.scopeRouterId;
       state.salesResellerId = Number(data.resellerId) || 0;
-      await refresh('', { fromSubmit: true });
+      refreshMoneyView();
       return;
     }
     if (form.dataset.form === 'actifs-filter') {
@@ -1476,14 +1523,17 @@ async function onAdminClick(event) {
   if (action === 'tab') {
     state.tab = button.dataset.tab;
     if (state.tab !== 'actifs') stopActifsPoll();
-    const periodSource = state.tab === 'recettes' ? state.recettes : state.sales;
-    if ((state.tab === 'sales' || state.tab === 'recettes') && periodSource?.todayDate) {
+    if (state.tab === 'sales' || state.tab === 'recettes') {
+      const periodSource = state.tab === 'recettes' ? state.recettes : state.sales;
+      const today = periodSource?.todayDate || localDateISO(new Date());
       state.periodKind = 'today';
-      state.salesFrom = periodSource.todayDate;
-      state.salesTo = periodSource.todayDate;
+      state.salesFrom = today;
+      state.salesTo = today;
     }
     render({ resetScroll: true });
-    if (state.tab === 'sales' || state.tab === 'recettes' || state.tab === 'profiles') {
+    if (state.tab === 'sales' || state.tab === 'recettes') {
+      refreshMoneyView();
+    } else if (state.tab === 'profiles') {
       loadWorkspace({ light: true })
         .then(() => { render(); })
         .catch((error) => showToast(error.message, 'err'));
@@ -1503,16 +1553,16 @@ async function onAdminClick(event) {
   }
   if (action === 'period') {
     const periodSource = state.tab === 'recettes' ? state.recettes : state.sales;
-    if (!periodSource) return;
     state.periodKind = button.dataset.period === 'month' ? 'month' : 'today';
+    const today = periodSource?.todayDate || localDateISO(new Date());
     if (state.periodKind === 'today') {
-      state.salesFrom = periodSource.todayDate;
-      state.salesTo = periodSource.todayDate;
+      state.salesFrom = today;
+      state.salesTo = today;
     } else {
-      state.salesFrom = periodSource.monthFrom;
-      state.salesTo = periodSource.todayDate;
+      state.salesFrom = periodSource?.monthFrom || monthRange(currentMonthKey()).start;
+      state.salesTo = today;
     }
-    await refresh('');
+    refreshMoneyView();
     return;
   }
   if (action === 'qr') {
@@ -1775,10 +1825,11 @@ async function boot() {
   }
 
   state.loading = true;
-  showAppBusy('Ouverture de l’espace admin…');
   render();
   try {
-    await loadWorkspace({ light: true });
+    const routers = await api('/api/admin/routers');
+    state.routers = routers.routers || [];
+    syncScopeFromRouters();
   } catch (error) {
     showToast(error.message, 'err');
   } finally {
@@ -1787,7 +1838,12 @@ async function boot() {
     render();
   }
 
-  setTimeout(() => { warmWorkspaceInBackground(); }, 4000);
+  loadWorkspace({ light: true })
+    .then(() => {
+      if (state.authed && state.tab !== 'sales' && state.tab !== 'recettes') render();
+      prefetchSales();
+    })
+    .catch((error) => showToast(error.message, 'err'));
 
   try {
     if (sessionStorage.getItem('opus.google.justLinked') === '1') {

@@ -105,11 +105,11 @@ async function usedCodesForMonth(month) {
   return used;
 }
 
-async function ensureResellerMonthCodes(resellerId) {
-  let reseller = await getOne('resellers', resellerId);
+async function ensureResellerMonthCodes(resellerId, ctx = null) {
+  let reseller = ctx?.reseller || await getOne('resellers', resellerId);
   if (!reseller) return [];
   const month = currentMonthKey();
-  const profiles = (await getAll('profiles'))
+  const profiles = (ctx?.profiles || await getAll('profiles'))
     .filter((profile) => profile.router_id === reseller.router_id && profile.active === 1 && profileSellable(profile))
     .sort((a, b) => a.name.localeCompare(b.name, 'fr'));
   const root = { ...(reseller.hmp_codes && typeof reseller.hmp_codes === 'object' ? reseller.hmp_codes : {}) };
@@ -117,7 +117,7 @@ async function ensureResellerMonthCodes(resellerId) {
   if (!Object.keys(monthMap).length && reseller.hmp_code) {
     monthMap['*'] = String(reseller.hmp_code);
   }
-  const used = await usedCodesForMonth(month);
+  const used = ctx?.used ? ctx.used : await usedCodesForMonth(month);
   Object.values(monthMap).forEach((code) => used.push(String(code)));
   let changed = false;
   const list = [];
@@ -1298,13 +1298,13 @@ async function profilesForRouter(routerId) {
   return profiles.map(publicProfile);
 }
 
-async function resellerView(reseller, month) {
+async function resellerView(reseller, month, bundle = null) {
   const range = monthRange(month);
-  const routers = await getAll('routers');
+  const routers = bundle?.routers || await getAll('routers');
   const router = routers.find((item) => item.id === reseller.router_id);
   const reachHost = resellerReachHost(router, reseller);
-  const latest = await getOne('resellers', reseller.id) || reseller;
-  const sales = (await getAll('sales')).filter((sale) => (
+  const latest = reseller;
+  const sales = (bundle?.sales || await getAll('sales')).filter((sale) => (
     sale.script_key
     && sale.reseller_id === reseller.id
     && sale.sale_date >= range.start
@@ -1313,11 +1313,11 @@ async function resellerView(reseller, month) {
   const soldAmount = sales.reduce((sum, sale) => sum + (sale.price || 0), 0);
   const ratePercent = parseRatePercent(latest.rate_percent);
   const monthShare = shareFromAmount(soldAmount, ratePercent);
-  const profiles = (await getAll('profiles')).filter((profile) => (
+  const profiles = (bundle?.profiles || await getAll('profiles')).filter((profile) => (
     profile.router_id === reseller.router_id && profile.active && profileSellable(profile)
   ));
-  const stocks = await getAll('stock');
-  const assignedItems = (await getAll('assigned')).filter((item) => item.reseller_id === reseller.id);
+  const stocks = bundle?.stocks || await getAll('stock');
+  const assignedItems = (bundle?.assigned || await getAll('assigned')).filter((item) => item.reseller_id === reseller.id);
   const handedCount = assignedItems.filter((item) => item.handed_at).length;
   const assignedGroups = new Map();
   assignedItems.forEach((item) => {
@@ -1336,8 +1336,12 @@ async function resellerView(reseller, month) {
   }));
   assignedLots.sort((a, b) => a.comment.localeCompare(b.comment, 'fr'));
   profiles.sort((a, b) => a.name.localeCompare(b.name, 'fr'));
-  const monthCodes = await ensureResellerMonthCodes(reseller.id);
-  const refreshed = await getOne('resellers', reseller.id) || latest;
+  const monthCodes = await ensureResellerMonthCodes(reseller.id, bundle ? {
+    reseller: latest,
+    profiles: bundle.profiles,
+    used: bundle.used,
+  } : null);
+  const refreshed = latest;
   return {
     id: refreshed.id,
     username: refreshed.username,
@@ -1619,7 +1623,16 @@ function normalizeCommentName(value) {
 }
 
 function commentKey(value) {
-  return String(value || '').trim().replace(/\s+/g, ' ').toLocaleUpperCase('fr');
+  return stripAppCommentMark(value).replace(/\s+/g, ' ').toLocaleUpperCase('fr');
+}
+
+function commentMarksAppSale(comment) {
+  return /^AP>/i.test(String(comment || '').trim());
+}
+
+function appSaleComment(comment) {
+  const clean = stripAppCommentMark(comment);
+  return clean ? `AP>${clean}` : 'AP>';
 }
 
 function commentMatchesName(comment, name) {
@@ -1829,8 +1842,8 @@ async function upgradeSalesSourceToApp(routerId, code) {
   }
 }
 
-function saleSourceFromEvidence(held, mark) {
-  if (mark) return 'AP';
+function saleSourceFromEvidence(held, mark, scriptComment) {
+  if (mark || commentMarksAppSale(scriptComment)) return 'AP';
   return saleSourceFromAssigned(held || {});
 }
 
@@ -1945,6 +1958,26 @@ function ticketResponse(router, ticket, profile, whenIso) {
   };
 }
 
+const salesDedupedRouters = new Set();
+let syncSideFixesDone = false;
+async function syncSideFixesOnce() {
+  if (syncSideFixesDone) return;
+  syncSideFixesDone = true;
+  await rematchOrphanScriptSales();
+  await rematchAppSaleSourcesFor(0);
+}
+
+async function writeSalesBatch(rows, assignedIds) {
+  if (!rows.length && !assignedIds.length) return;
+  const db = await openDatabase();
+  const tx = db.transaction(['sales', 'assigned'], 'readwrite');
+  const salesStore = tx.objectStore('sales');
+  const assignedStore = tx.objectStore('assigned');
+  rows.forEach((row) => salesStore.put(row));
+  assignedIds.forEach((id) => assignedStore.delete(id));
+  await transactionDone(tx);
+}
+
 async function syncHapSales({ resellerId = 0, routerId = 0, from = '', to = '', force = false } = {}) {
   if (licenseOpsFrozen()) {
     return { warning: licenseFrozenMessage(), created: 0, removed: 0, read: 0 };
@@ -1971,8 +2004,7 @@ async function syncHapSales({ resellerId = 0, routerId = 0, from = '', to = '', 
     if (!selected.length) {
       return { created: 0, removed: 0, read: 0, unmatched: 0, warning: 'Aucun routeur enregistré.' };
     }
-    await rematchOrphanScriptSales();
-    await rematchAppSaleSourcesFor(resellerId || 0);
+    await syncSideFixesOnce();
     const owners = scriptOwnersBetween(windowFrom, windowTo);
     const sold = new Set(sales.map((sale) => `${sale.router_id}:${String(sale.code || '').trim().toLowerCase()}`));
     const scriptKeys = new Set(sales.map((sale) => sale.script_key).filter(Boolean));
@@ -2010,12 +2042,14 @@ async function syncHapSales({ resellerId = 0, routerId = 0, from = '', to = '', 
         continue;
       }
       let createdHere = 0;
+      const freshSales = [];
+      const dropAssigned = [];
       for (const entry of entries) {
         const held = assigned.find((item) => (
           Number(item.router_id) === Number(baseRouter.id) && sameTicketCode(item.name, entry.code)
         ));
         const mark = marksByCode.get(`${Number(baseRouter.id)}:${String(entry.code || '').trim().toLowerCase()}`);
-        const source = saleSourceFromEvidence(held, mark);
+        const source = saleSourceFromEvidence(held, mark, entry.comment);
 
         // Vente déjà importée : mettre à jour HAP → AP si remis via l’app entre-temps.
         // On garde app_marks (preuve durable) ; on retire seulement la fiche assigned consommée.
@@ -2045,7 +2079,7 @@ async function syncHapSales({ resellerId = 0, routerId = 0, from = '', to = '', 
         }
         const profile = matchProfileForScript(entry, profiles, baseRouter.id);
         const connectedAt = scriptConnectedAt(entry);
-        await putOne('sales', {
+        freshSales.push({
           reseller_id: owner ? owner.id : 0,
           reseller_name: owner ? owner.hmp_name : label,
           router_id: baseRouter.id,
@@ -2066,14 +2100,14 @@ async function syncHapSales({ resellerId = 0, routerId = 0, from = '', to = '', 
         sold.add(`${baseRouter.id}:${String(entry.code).trim().toLowerCase()}`);
         scriptKeys.add(entry.scriptName);
         if (held) {
-          await deleteOne('assigned', held.id);
+          dropAssigned.push(held.id);
           const idx = assigned.indexOf(held);
           if (idx >= 0) assigned.splice(idx, 1);
         }
-        // app_marks conservée : preuve AP même après import (pas d’écriture MikroTik).
         created += 1;
         createdHere += 1;
       }
+      await writeSalesBatch(freshSales, dropAssigned);
       const removedHere = await reconcileMissingScriptSales(
         baseRouter.id,
         entries,
@@ -2082,7 +2116,11 @@ async function syncHapSales({ resellerId = 0, routerId = 0, from = '', to = '', 
         sales,
       );
       removed += removedHere;
-      const deduped = await dedupeSalesForRouter(baseRouter.id);
+      let deduped = 0;
+      if (createdHere || !salesDedupedRouters.has(baseRouter.id)) {
+        salesDedupedRouters.add(baseRouter.id);
+        deduped = await dedupeSalesForRouter(baseRouter.id);
+      }
       removed += deduped;
       if (createdHere || removedHere || deduped) invalidateScriptListCache(baseRouter.id);
     }
@@ -2379,6 +2417,24 @@ async function usageMap(rows) {
     }
   }
   return { statuses, warning };
+}
+
+async function setHotspotUserComment(router, name, comment) {
+  const results = await routerRun(router, [[
+    '/ip/hotspot/user/print',
+    `?name=${name}`,
+    '=.proplist=.id,comment',
+  ]], 8000);
+  const row = results[0]?.rows?.[0];
+  const id = row?.['.id'];
+  if (!id) return false;
+  if (String(row.comment || '') === String(comment || '')) return true;
+  await routerRun(router, [[
+    '/ip/hotspot/user/set',
+    `=.id=${id}`,
+    `=comment=${comment}`,
+  ]]);
+  return true;
 }
 
 async function removeHotspotUser(router, name) {
@@ -2818,10 +2874,25 @@ async function handle(method, url, body) {
     const light = query.get('light') === '1';
     await purgeNonScriptSales();
     if (!light) await rematchAllScriptSalesOnce();
-    const resellers = await getAll('resellers');
+    const [routers, resellers, sales, profiles, stocks, assigned] = await Promise.all([
+      getAll('routers'),
+      getAll('resellers'),
+      getAll('sales'),
+      getAll('profiles'),
+      getAll('stock'),
+      getAll('assigned'),
+    ]);
     resellers.sort((a, b) => a.hmp_name.localeCompare(b.hmp_name, 'fr'));
+    const bundle = {
+      routers,
+      sales,
+      profiles,
+      stocks,
+      assigned,
+      used: await usedCodesForMonth(month),
+    };
     const views = [];
-    for (const reseller of resellers) views.push(await resellerView(reseller, month));
+    for (const reseller of resellers) views.push(await resellerView(reseller, month, bundle));
     return ok({ month, resellers: views });
   }
 
@@ -3114,15 +3185,14 @@ async function handle(method, url, body) {
     if (!range) return fail(400, 'La période est invalide.');
     const purged = await purgeNonScriptSales();
     const skipSync = query.get('sync') === '0';
-    // Toujours synchroniser le mois en cours pour alimenter les stats « Ce mois »,
-    // même si l’affichage filtre une sous-période (ex. aujourd’hui).
+    // Mois en cours pour les cartes, et la période demandée si elle déborde.
     const sync = skipSync
       ? { warning: '', created: 0, removed: 0, read: 0 }
       : await syncHapSales({
         resellerId: range.resellerId,
         routerId: range.routerId,
-        from: range.monthFrom,
-        to: range.today,
+        from: range.from < range.monthFrom ? range.from : range.monthFrom,
+        to: range.to > range.today ? range.to : range.today,
         force: query.get('force') === '1',
       });
     const rows = await reportRows(range);
@@ -3182,8 +3252,8 @@ async function handle(method, url, body) {
       : await syncHapSales({
         resellerId: range.resellerId,
         routerId: range.routerId,
-        from: range.monthFrom,
-        to: range.today,
+        from: range.from < range.monthFrom ? range.from : range.monthFrom,
+        to: range.to > range.today ? range.to : range.today,
         force: query.get('force') === '1',
       });
     const rows = await reportRows(range);
@@ -3461,7 +3531,7 @@ async function handle(method, url, body) {
         password: code,
         profile: profile.name,
         limitUptime: profile.limit_uptime,
-        comment,
+        comment: appSaleComment(comment),
       });
       userCreated = true;
       await saveRemise();
@@ -3533,6 +3603,11 @@ async function handle(method, url, body) {
       await syncHapSales({ resellerId: reseller.id, force: false });
       return fail(400, `Ce ticket est déjà connecté depuis le ${scriptHit.date} à ${scriptHit.time}. Ne le remettez pas.`);
     }
+    try {
+      await setHotspotUserComment(router, ticket.name, appSaleComment(ticket.comment));
+    } catch (error) {
+      return fail(502, error.message || 'Impossible de marquer ce ticket sur le routeur.');
+    }
     const handedAt = new Date().toISOString();
     ticket.handed_at = handedAt;
     ticket.channel = ticket.channel || 'LOT';
@@ -3584,6 +3659,11 @@ async function handle(method, url, body) {
       item.router_id === reseller.router_id && item.name === ticket.profile && item.active === 1 && item.price != null
     ));
     if (!profile) return fail(400, 'Le forfait de ce ticket n\'est plus disponible.');
+    try {
+      await setHotspotUserComment(router, ticket.name, appSaleComment(ticket.comment));
+    } catch (error) {
+      return fail(502, error.message || 'Impossible de marquer ce ticket sur le routeur.');
+    }
     const handedAt = new Date().toISOString();
     ticket.handed_at = ticket.handed_at || handedAt;
     await putOne('assigned', ticket);
@@ -3643,6 +3723,11 @@ async function handle(method, url, body) {
     delete ticket.handed_at;
     await putOne('assigned', ticket);
     await forgetAppSale(reseller.router_id, ticket.name);
+    try {
+      await setHotspotUserComment(router, ticket.name, stripAppCommentMark(ticket.comment));
+    } catch {
+      // La preuve locale est déjà retirée. Le commentaire routeur sera réaligné à la prochaine remise.
+    }
     return ok({ cancelled: true, channel: 'LOT', code: ticket.name, stockRestored: false });
   }
 
