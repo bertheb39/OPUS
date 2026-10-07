@@ -337,6 +337,15 @@ function licenseAllows(record) {
   return true;
 }
 
+function licenseLocksOneDevice(record) {
+  return Boolean(record && record.plan && record.plan !== 'fondateur');
+}
+
+function licenseDeviceTaken(record, deviceId) {
+  if (!licenseLocksOneDevice(record)) return false;
+  return Boolean(record.deviceId && record.deviceId !== deviceId);
+}
+
 const LICENSE_RIGHTS = {
   basique: {
     maxRouters: 1, maxResellers: 2, maxResellersPerRouter: 2, drive: false,
@@ -1066,10 +1075,10 @@ async function activateLicense(code) {
     }
   }
   const mine = licenseDeviceId();
-  if (remote.deviceId && remote.deviceId !== mine) {
+  if (licenseDeviceTaken(remote, mine)) {
     throw new Error('Ce code est déjà lié à un autre téléphone.');
   }
-  if (!remote.deviceId) {
+  if (licenseLocksOneDevice(remote) && !remote.deviceId) {
     await bindLicenseDevice(code, mine);
     remote.deviceId = mine;
   }
@@ -1116,11 +1125,11 @@ async function refreshLicenseOrGrace() {
   try {
     const remote = await fetchLicenseRemote(cache.code);
     const mine = licenseDeviceId();
-    if (remote.deviceId && remote.deviceId !== mine) {
+    if (licenseDeviceTaken(remote, mine)) {
       showLicenseGate({ mode: 'blocked', canRenew: false, message: 'Ce code est déjà lié à un autre téléphone.' });
       return true;
     }
-    if (!remote.deviceId) {
+    if (licenseLocksOneDevice(remote) && !remote.deviceId) {
       await bindLicenseDevice(cache.code, mine);
       remote.deviceId = mine;
     }

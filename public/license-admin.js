@@ -182,12 +182,12 @@ function renderClients() {
         <h2>${esc(item.clientName || item.code)}</h2>
         <span class="meta">${esc(item.plan)} · ${esc(item.status)}</span>
       </div>
-      <p class="meta"><strong>${esc(item.code)}</strong> · fin ${esc(item.endsAt || '—')} · ${item.deviceId ? 'téléphone lié' : 'pas encore lié'}</p>
+      <p class="meta"><strong>${esc(item.code)}</strong> · fin ${esc(item.endsAt || '—')} · ${item.plan === 'fondateur' ? 'appareils illimités' : (item.deviceId ? 'téléphone lié' : 'pas encore lié')}</p>
       <p class="meta">${esc(item.phone || '—')}${item.notes ? ` · ${esc(item.notes)}` : ''}</p>
       <div class="actions">
         <button type="button" data-action="client-extend" data-months="1" data-code="${esc(item.code)}">+1 mois</button>
         <button type="button" data-action="client-extend" data-months="3" data-code="${esc(item.code)}">+3 mois</button>
-        <button type="button" class="btn-quiet" data-action="client-detach" data-code="${esc(item.code)}">Détacher</button>
+        ${item.plan === 'fondateur' ? '' : `<button type="button" class="btn-quiet" data-action="client-detach" data-code="${esc(item.code)}">Détacher</button>`}
         <button type="button" class="btn-quiet" data-action="client-reset-password" data-code="${esc(item.code)}">Autoriser réinit. mot de passe</button>
         ${item.status === 'active'
           ? `<button type="button" class="btn-quiet" data-action="client-suspend" data-code="${esc(item.code)}">Suspendre</button>`
