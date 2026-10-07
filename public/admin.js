@@ -1405,7 +1405,7 @@ async function saveBackupFile() {
   showToast('Copie enregistrée.', 'ok');
 }
 
-app.addEventListener('click', async (event) => {
+async function onAdminClick(event) {
   const button = event.target.closest('[data-action]');
   if (!button) return;
   const action = button.dataset.action;
@@ -1645,6 +1645,11 @@ app.addEventListener('click', async (event) => {
   } catch (error) {
     showToast(error.message || 'Échec du test.', 'err');
   }
+}
+
+app.addEventListener('click', onAdminClick);
+document.addEventListener('click', (event) => {
+  if (event.target.closest('#app-dock')) onAdminClick(event);
 });
 
 app.addEventListener('change', async (event) => {

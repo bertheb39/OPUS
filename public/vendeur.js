@@ -498,7 +498,7 @@ app.addEventListener('submit', async (event) => {
   }
 });
 
-app.addEventListener('click', async (event) => {
+async function onVendeurClick(event) {
   const button = event.target.closest('[data-action]');
   if (!button || state.busy) return;
   const action = button.dataset.action;
@@ -697,6 +697,11 @@ app.addEventListener('click', async (event) => {
       after: () => { state.busy = false; },
     });
   }
+}
+
+app.addEventListener('click', onVendeurClick);
+document.addEventListener('click', (event) => {
+  if (event.target.closest('#app-dock')) onVendeurClick(event);
 });
 
 logoutButton.addEventListener('click', async () => {

@@ -8,7 +8,7 @@
 </head>
 <body class="page-admin">
   <header>
-    <strong>Administration</strong>
+    <strong>Admin</strong>
     <div class="header-actions">
       <label id="scope-router-wrap" class="header-scope" hidden>
         <span class="visually-hidden">Routeur</span>
@@ -16,7 +16,9 @@
       </label>
       <button id="to-clients" type="button" class="header-link" hidden>Clients</button>
       <a id="to-sale" class="header-link" href="vendeur.html" hidden>Vente</a>
-      <button id="logout" type="button" hidden>Quitter</button>
+      <button id="logout" type="button" hidden aria-label="Déconnexion" title="Déconnexion">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+      </button>
     </div>
   </header>
   <main id="app"></main>

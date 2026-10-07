@@ -188,7 +188,7 @@ function parseLicenseDoc(doc) {
   return {
     clientName: firestoreString(fields, 'clientName'),
     phone: firestoreString(fields, 'phone'),
-    plan: firestoreString(fields, 'plan').toLowerCase(),
+    plan: firestoreString(fields, 'plan').trim().toLowerCase(),
     status: firestoreString(fields, 'status').toLowerCase(),
     startsAt: firestoreString(fields, 'startsAt'),
     endsAt: firestoreString(fields, 'endsAt'),
@@ -338,7 +338,10 @@ function licenseAllows(record) {
 }
 
 function licenseLocksOneDevice(record) {
-  return Boolean(record && record.plan && record.plan !== 'fondateur');
+  if (!record?.plan) return false;
+  if (record.plan === 'fondateur') return false;
+  if (normalizeLicenseCode(record.code) === 'HT-FONDATEUR-001') return false;
+  return true;
 }
 
 function licenseDeviceTaken(record, deviceId) {
@@ -410,16 +413,25 @@ function licenseStatusCardHtml() {
   if (typeof isFounderLicense === 'function' && isFounderLicense()) return '';
   const record = workspaceLicenseRecord() || readLicenseCache();
   const plan = currentLicensePlan() || record?.plan || '';
-  const remaining = licenseRemainingLabel(record);
-  const until = formatLicenseDate(record?.endsAt);
   const frozen = licenseFrozen(record);
+  const days = licenseDaysLeft(record);
+  const until = formatLicenseDate(record?.endsAt);
+  let daysLabel = 'Durée non définie';
+  if (frozen) daysLabel = 'Terminé';
+  else if (Number.isFinite(days)) {
+    if (days <= 0) daysLabel = 'Dernier jour';
+    else if (days === 1) daysLabel = '1 jour';
+    else daysLabel = `${days} jours`;
+  }
+  const planLabel = licensePlanLabel(plan || (frozen ? record?.plan : '') || 'Aucune offre');
   return `
-    <section class="card license-status-card${frozen ? ' is-expired' : ''}">
-      <h2>Mon abonnement</h2>
-      <p><strong>${esc(licensePlanLabel(plan || (frozen ? record?.plan : '') || 'Aucune offre'))}</strong></p>
-      ${until ? `<p class="meta">Valable jusqu’au ${esc(until)}</p>` : ''}
-      ${remaining ? `<p class="license-remaining">${esc(remaining)}</p>` : '<p class="meta">Durée non définie.</p>'}
-      <button type="button" class="btn-quiet btn-block" data-action="manage-subscription">${frozen ? 'Renouveler' : 'Gérer mon abonnement'}</button>
+    <section class="license-status-card${frozen ? ' is-expired' : ''}">
+      <span class="license-status-plan">${esc(planLabel)}</span>
+      <span class="license-status-copy">
+        <strong>${esc(daysLabel)}</strong>
+        ${until ? `<span>jusqu’au ${esc(until)}</span>` : '<span>Sans date de fin</span>'}
+      </span>
+      <button type="button" class="license-status-btn" data-action="manage-subscription">${frozen ? 'Renouveler' : 'Gérer'}</button>
     </section>
   `;
 }
@@ -915,6 +927,15 @@ async function refreshSubscriptionModal(root) {
         <p class="meta" data-request-status hidden></p>
         <button class="btn-sell" type="submit">Envoyer la demande</button>
       </form>`}
+      <form data-license-form class="license-code-row">
+        <label>Code déjà reçu</label>
+        <div class="license-code-line">
+          <input name="code" required autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="HT-XXXX-000">
+          <button type="submit">Activer</button>
+        </div>
+        <p class="meta" data-license-status hidden></p>
+        <p class="meta">Collez le code qui vous a été remis.</p>
+      </form>
       <form data-license-transfer-form class="stack">
         <p class="meta">Nouveau téléphone ? Après détachement, le même nom et le même numéro qu’à l’abonnement suffisent.</p>
         <label>Nom et prénom</label>
@@ -939,6 +960,7 @@ async function refreshSubscriptionModal(root) {
       showToast(code, 'ok');
     }
   });
+  bindLicenseCodeForm(root);
   root.querySelector('[data-close-subscription]')?.addEventListener('click', closeSubscriptionModal);
   root.addEventListener('click', (event) => {
     if (event.target === root) closeSubscriptionModal();
@@ -1074,6 +1096,8 @@ async function activateLicense(code) {
       throw error;
     }
   }
+  remote.code = code;
+  if (code === 'HT-FONDATEUR-001') remote.plan = 'fondateur';
   const mine = licenseDeviceId();
   if (licenseDeviceTaken(remote, mine)) {
     throw new Error('Ce code est déjà lié à un autre téléphone.');
@@ -1124,6 +1148,8 @@ async function refreshLicenseOrGrace() {
   }
   try {
     const remote = await fetchLicenseRemote(cache.code);
+    remote.code = cache.code;
+    if (normalizeLicenseCode(cache.code) === 'HT-FONDATEUR-001') remote.plan = 'fondateur';
     const mine = licenseDeviceId();
     if (licenseDeviceTaken(remote, mine)) {
       showLicenseGate({ mode: 'blocked', canRenew: false, message: 'Ce code est déjà lié à un autre téléphone.' });
@@ -1174,34 +1200,7 @@ function licensePlanLabel(plan) {
 }
 
 function paintLicenseBadge() {
-  const host = document.querySelector('header .header-actions');
-  if (!host) return;
-  let badge = document.getElementById('license-badge');
-  const cache = workspaceLicenseRecord() || readLicenseCache();
-  if (!cache?.code) {
-    if (badge) badge.remove();
-    return;
-  }
-  if (!badge) {
-    badge = document.createElement('span');
-    badge.id = 'license-badge';
-    badge.className = 'license-badge';
-    host.prepend(badge);
-  }
-  const remoteOk = cache.checkedAt && (Date.now() - Number(cache.checkedAt) < licenseGraceMs);
-  const warning = licenseExpiryWarning(cache);
-  const days = licenseDaysLeft(cache);
-  let label = licensePlanLabel(cache.plan);
-  if (licenseFrozen(cache)) label = 'Expiré';
-  else if (!remoteOk) label += ' (hors-ligne)';
-  else if (Number.isFinite(days) && cache.plan !== 'fondateur') {
-    label += days <= 0 ? ' · dernier jour' : ` · ${days} j`;
-  }
-  badge.textContent = label;
-  badge.title = cache.endsAt
-    ? `${licensePlanLabel(cache.plan)} · ${licenseRemainingLabel(cache)} · ${formatLicenseDate(cache.endsAt)}`
-    : cache.code;
-  badge.classList.toggle('is-warn', Boolean(warning) || licenseFrozen(cache));
+  document.getElementById('license-badge')?.remove();
 }
 
 function paintLicenseExpiryNotice() {
