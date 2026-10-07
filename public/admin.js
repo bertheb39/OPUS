@@ -1,12 +1,16 @@
 const app = document.getElementById('app');
 const logoutButton = document.getElementById('logout');
 const saleLink = document.getElementById('to-sale');
+const scopeRouterSelect = document.getElementById('scope-router');
+const scopeRouterWrap = document.getElementById('scope-router-wrap');
+const scopeRouterKey = 'opus.scopeRouter';
 
 const state = {
   needsSetup: false,
   authed: false,
   tab: 'routers',
   routers: [],
+  scopeRouterId: 0,
   profilesRouterId: 0,
   profiles: [],
   resellers: [],
@@ -41,6 +45,70 @@ function routerOptions(selected) {
   return state.routers.map((router) => (
     `<option value="${router.id}" ${Number(selected) === router.id ? 'selected' : ''}>${esc(router.name)}</option>`
   )).join('');
+}
+
+function readStoredScopeRouter() {
+  const n = Number(localStorage.getItem(scopeRouterKey) || 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function scopedResellers() {
+  if (!state.scopeRouterId) return state.resellers;
+  return state.resellers.filter((reseller) => Number(reseller.routerId) === Number(state.scopeRouterId));
+}
+
+function resellerFilterOptions() {
+  const list = scopedResellers();
+  const selected = list.some((item) => item.id === state.salesResellerId) ? state.salesResellerId : 0;
+  return ['<option value="0">Tous les revendeurs</option>'].concat(list.map((reseller) => (
+    `<option value="${reseller.id}" ${selected === reseller.id ? 'selected' : ''}>${esc(reseller.hmpName)}</option>`
+  ))).join('');
+}
+
+function applyScopeRouter(id, options = {}) {
+  const next = Number(id) || 0;
+  const known = state.routers.some((router) => router.id === next);
+  const resolved = known ? next : (state.routers[0]?.id || 0);
+  const changed = resolved !== state.scopeRouterId;
+  state.scopeRouterId = resolved;
+  if (options.persist !== false) {
+    try { localStorage.setItem(scopeRouterKey, String(state.scopeRouterId)); } catch { /* ignore */ }
+  }
+  state.salesRouterId = state.scopeRouterId;
+  state.actifsRouterId = state.scopeRouterId;
+  if (state.scopeRouterId) state.profilesRouterId = state.scopeRouterId;
+  if (changed) state.profiles = [];
+  if (state.salesResellerId) {
+    const stays = scopedResellers().some((item) => item.id === state.salesResellerId);
+    if (!stays) state.salesResellerId = 0;
+  }
+}
+
+function syncScopeFromRouters() {
+  const saved = state.scopeRouterId || readStoredScopeRouter();
+  const exists = state.routers.some((router) => router.id === saved);
+  if (exists) applyScopeRouter(saved);
+  else if (state.routers[0]) applyScopeRouter(state.routers[0].id);
+  else applyScopeRouter(0);
+}
+
+function paintHeaderScope() {
+  if (!scopeRouterSelect || !scopeRouterWrap) return;
+  const show = state.authed && !state.needsSetup && state.routers.length > 0;
+  scopeRouterWrap.hidden = !show;
+  if (!show) return;
+  const current = state.scopeRouterId;
+  scopeRouterSelect.innerHTML = state.routers.map((router) => (
+    `<option value="${router.id}" ${Number(current) === router.id ? 'selected' : ''}>${esc(router.name)}</option>`
+  )).join('');
+}
+
+function scopedRouterField(selected) {
+  if (state.scopeRouterId) {
+    const name = state.routers.find((item) => item.id === state.scopeRouterId)?.name || '—';
+    return `<p class="meta">Routeur : <strong>${esc(name)}</strong></p><input type="hidden" name="routerId" value="${esc(state.scopeRouterId)}">`;
+  }
+  return `<label>Routeur</label><select name="routerId" required>${routerOptions(selected)}</select>`;
 }
 
 function renderSetup() {
@@ -113,7 +181,10 @@ function reachMode() {
 
 function renderRouters() {
   const mode = reachMode();
-  const cards = state.routers.map((router) => {
+  const listed = state.scopeRouterId
+    ? state.routers.filter((router) => router.id === state.scopeRouterId)
+    : state.routers;
+  const cards = listed.map((router) => {
     const editing = state.editingRouterId === router.id;
     return `
       <article class="card">
@@ -211,10 +282,14 @@ function renderProfiles() {
     `;
   }).join('');
 
+  const scoped = Boolean(state.scopeRouterId);
+  const routerPick = scoped
+    ? `<p class="meta">Routeur : <strong>${esc(state.routers.find((item) => item.id === state.scopeRouterId)?.name || '—')}</strong></p>`
+    : `<label for="profile-router">Routeur</label>
+      <select id="profile-router">${routerOptions(state.profilesRouterId)}</select>`;
   return `
     <section class="card">
-      <label for="profile-router">Routeur</label>
-      <select id="profile-router">${routerOptions(state.profilesRouterId)}</select>
+      ${routerPick}
     </section>
     ${state.profilesRouterId ? (cards || '<section class="card"><p class="meta">Aucun forfait.</p></section>') : ''}
   `;
@@ -234,7 +309,8 @@ function resellerMatchesQuery(reseller, query) {
 }
 
 function renderResellers() {
-  const filtered = state.resellers.filter((reseller) => resellerMatchesQuery(reseller, state.resellerQuery));
+  const pool = scopedResellers();
+  const filtered = pool.filter((reseller) => resellerMatchesQuery(reseller, state.resellerQuery));
   const cards = filtered.map((reseller) => {
     const stock = reseller.stock.length
       ? `<p class="meta">Stock : ${reseller.stock.map((item) => `${esc(item.name)} ${esc(item.remaining)}`).join(' · ')}</p>`
@@ -268,13 +344,12 @@ function renderResellers() {
         ${state.lotOpen === reseller.id ? renderLot(reseller) : ''}
         <form data-form="reseller-update" data-id="${reseller.id}" data-active="${reseller.active ? '1' : '0'}" class="stack">
           <label>Nom sur le ticket</label>
-          <input name="hmpName" value="${esc(reseller.hmpName)}" required autocapitalize="characters">
+          <input name="hmpName" value="${esc(reseller.hmpName)}" required autocapitalize="characters" maxlength="40">
           <label>Mots-clés des ventes</label>
           <input name="saleKeywords" value="${esc((reseller.saleKeywords || []).join(', '))}" placeholder="HOME, voisin" autocapitalize="characters">
           <label>Taux à reverser (%)</label>
           <input name="ratePercent" type="number" min="0" max="100" step="0.01" value="${reseller.ratePercent == null ? '' : esc(reseller.ratePercent)}" placeholder="Ex. 75" inputmode="decimal">
-          <label>Routeur</label>
-          <select name="routerId" required>${routerOptions(reseller.routerId)}</select>
+          ${scopedRouterField(reseller.routerId)}
           <label>Adresse routeur</label>
           <input name="host" value="${esc(reseller.host || reseller.reachHost || '')}" placeholder="IP locale ou VPN" required>
           <label>Nouveau mot de passe</label>
@@ -299,21 +374,20 @@ function renderResellers() {
         autocapitalize="characters"
         data-reseller-search
       >
-      <p class="meta">${esc(filtered.length)} / ${esc(state.resellers.length)} affiché${filtered.length > 1 ? 's' : ''}</p>
+      <p class="meta">${esc(filtered.length)} / ${esc(pool.length)} affiché${filtered.length > 1 ? 's' : ''}${state.scopeRouterId ? ' sur ce routeur' : ''}</p>
     </section>
     <section class="card">
       <h2>Revendeur</h2>
       <form data-form="reseller" class="stack">
         <label>Nom sur le ticket</label>
-        <input name="hmpName" required placeholder="HOME" autocapitalize="characters">
+        <input name="hmpName" required placeholder="HORIZON TEAM" autocapitalize="characters" maxlength="40">
         <label>Mots-clés des ventes</label>
         <input name="saleKeywords" placeholder="HOME, voisin" autocapitalize="characters">
         <label>Taux à reverser (%)</label>
         <input name="ratePercent" type="number" min="0" max="100" step="0.01" placeholder="Ex. 75" inputmode="decimal" required>
         <label>Mot de passe</label>
         ${passwordField({ name: 'password', autocomplete: 'new-password', required: true, minlength: 4 })}
-        <label>Routeur</label>
-        <select name="routerId" required>${routerOptions('')}</select>
+        ${scopedRouterField(state.scopeRouterId || '')}
         <label>Adresse routeur</label>
         <input name="host" required placeholder="Ex. 192.168.196.196">
         <div class="actions">
@@ -322,7 +396,7 @@ function renderResellers() {
         </div>
       </form>
     </section>
-    ${cards || `<p class="meta">${state.resellers.length ? 'Aucun revendeur ne correspond à la recherche.' : 'Aucun revendeur.'}</p>`}
+    ${cards || `<p class="meta">${pool.length ? 'Aucun revendeur ne correspond à la recherche.' : 'Aucun revendeur sur ce routeur.'}</p>`}
   `;
 }
 
@@ -394,13 +468,14 @@ function renderLot(reseller) {
 }
 
 function openStockModal() {
-  if (!state.resellers.length) {
+  const stockResellers = scopedResellers();
+  if (!stockResellers.length) {
     showToast('Aucun revendeur.', 'err');
     return;
   }
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  const resellerOptions = state.resellers.map((reseller) => (
+  const resellerOptions = stockResellers.map((reseller) => (
     `<option value="${reseller.id}">${esc(reseller.hmpName)}</option>`
   )).join('');
   overlay.innerHTML = `
@@ -534,12 +609,7 @@ function renderSales() {
       <div class="meta">${esc(sale.when)} · ${esc(sale.comment || sale.keyword || sale.reseller || '—')} · ${esc(sale.router)} · ${esc(sale.profile)}</div>
     </article>
   `).join('');
-  const resellerOptions = ['<option value="0">Tous les revendeurs</option>'].concat(state.resellers.map((reseller) => (
-    `<option value="${reseller.id}" ${state.salesResellerId === reseller.id ? 'selected' : ''}>${esc(reseller.hmpName)}</option>`
-  ))).join('');
-  const routerOptionsHtml = ['<option value="0">Tous les PTP</option>'].concat(state.routers.map((router) => (
-    `<option value="${router.id}" ${state.salesRouterId === router.id ? 'selected' : ''}>${esc(router.name)}</option>`
-  ))).join('');
+  const resellerOptions = resellerFilterOptions();
   const kind = state.periodKind || (
     sales && state.salesFrom === sales.todayDate && state.salesTo === sales.todayDate
       ? 'today'
@@ -583,8 +653,7 @@ function renderSales() {
             <input name="to" type="date" value="${esc(state.salesTo || sales?.period.to || '')}" required>
           </div>
         </div>
-        <label>PTP</label>
-        <select name="routerId">${routerOptionsHtml}</select>
+        <input type="hidden" name="routerId" value="${esc(state.scopeRouterId || 0)}">
         <label>Revendeur</label>
         <select name="resellerId">${resellerOptions}</select>
         <button type="submit">Afficher</button>
@@ -604,11 +673,11 @@ function renderSales() {
 }
 
 function renderActifs() {
-  const routerOptionsHtml = ['<option value="0">Tous les PTP</option>'].concat(state.routers.map((router) => (
-    `<option value="${router.id}" ${Number(state.actifsRouterId) === router.id ? 'selected' : ''}>${esc(router.name)}</option>`
-  ))).join('');
   const list = state.actifs?.sessions || [];
   const clock = state.actifs?.at ? formatClock(state.actifs.at) : '';
+  const routerName = state.scopeRouterId
+    ? (state.routers.find((item) => item.id === state.scopeRouterId)?.name || '—')
+    : 'Tous les routeurs';
   return `
     <section class="card">
       <div class="actifs-head">
@@ -618,10 +687,7 @@ function renderActifs() {
           ${clock ? `<span class="actifs-live-clock">${esc(clock)}</span>` : ''}
         </span>
       </div>
-      <form data-form="actifs-filter" class="field-row">
-        <select name="routerId" aria-label="PTP">${routerOptionsHtml}</select>
-        <button type="submit">OK</button>
-      </form>
+      <p class="meta">Routeur : <strong>${esc(routerName)}</strong></p>
       ${state.actifsWarning ? `<p class="meta">${esc(state.actifsWarning)}</p>` : ''}
       <div data-actifs-body>${actifsTableHtml(list, { admin: true })}</div>
     </section>
@@ -642,12 +708,7 @@ function renderRecettes() {
       ? 'today'
       : (data && state.salesFrom === data.monthFrom && state.salesTo === data.todayDate ? 'month' : '')
   );
-  const resellerOptions = ['<option value="0">Tous les revendeurs</option>'].concat(state.resellers.map((reseller) => (
-    `<option value="${reseller.id}" ${state.salesResellerId === reseller.id ? 'selected' : ''}>${esc(reseller.hmpName)}</option>`
-  ))).join('');
-  const routerOptionsHtml = ['<option value="0">Tous les PTP</option>'].concat(state.routers.map((router) => (
-    `<option value="${router.id}" ${state.salesRouterId === router.id ? 'selected' : ''}>${esc(router.name)}</option>`
-  ))).join('');
+  const resellerOptions = resellerFilterOptions();
   const period = data?.period;
   const periodLabel = period
     ? (period.from === period.to ? period.from : `${period.from} → ${period.to}`)
@@ -721,8 +782,7 @@ function renderRecettes() {
             <input name="to" type="date" value="${esc(state.salesTo || data?.period?.to || '')}" required>
           </div>
         </div>
-        <label>PTP</label>
-        <select name="routerId">${routerOptionsHtml}</select>
+        <input type="hidden" name="routerId" value="${esc(state.scopeRouterId || 0)}">
         <label>Revendeur</label>
         <select name="resellerId">${resellerOptions}</select>
         <button type="submit">Actualiser</button>
@@ -812,6 +872,7 @@ function render(options = {}) {
     document.body.classList.toggle('has-dock', state.authed);
     logoutButton.hidden = !state.authed;
     if (saleLink) saleLink.hidden = !state.authed && !isOwner();
+    paintHeaderScope();
     if (state.needsSetup) renderSetup();
     else if (!state.authed) renderLogin();
     else renderApp();
@@ -827,7 +888,7 @@ async function loadWorkspace(options = {}) {
   const light = Boolean(options.light);
   const routers = await api('/api/admin/routers');
   state.routers = routers.routers || [];
-  if (!state.profilesRouterId && state.routers[0]) state.profilesRouterId = state.routers[0].id;
+  syncScopeFromRouters();
   if (state.loading) {
     state.loading = false;
     render();
@@ -999,10 +1060,12 @@ async function refresh(message, options = {}) {
     if (message) showToast(message, 'ok');
     return;
   }
+  const quiet = Boolean(options.quiet) || (light && state.routers.length > 0);
   await runBusyRender(render, async () => {
     await loadWorkspace({ light });
     if (message) showToast(message, 'ok');
   }, {
+    quiet,
     busyLabel: light ? 'Mise à jour…' : 'Chargement…',
     before: () => { state.busy = true; },
     after: () => { state.busy = false; },
@@ -1063,7 +1126,8 @@ app.addEventListener('submit', async (event) => {
       return;
     }
     if (form.dataset.form === 'router') {
-      await api('/api/admin/routers', { method: 'POST', body: data });
+      const created = await api('/api/admin/routers', { method: 'POST', body: data });
+      if (created?.router?.id) applyScopeRouter(created.router.id);
       await refresh('Routeur enregistré.', { fromSubmit: true });
       return;
     }
@@ -1181,7 +1245,7 @@ app.addEventListener('submit', async (event) => {
       state.salesFrom = data.from;
       state.salesTo = data.to;
       state.periodKind = '';
-      state.salesRouterId = Number(data.routerId) || 0;
+      state.salesRouterId = state.scopeRouterId;
       state.salesResellerId = Number(data.resellerId) || 0;
       await refresh('', { fromSubmit: true });
       return;
@@ -1356,8 +1420,8 @@ app.addEventListener('click', async (event) => {
       state.salesTo = periodSource.todayDate;
     }
     render({ resetScroll: true });
-    if (state.tab === 'sales' || state.tab === 'recettes') {
-      loadWorkspace({ light: false })
+    if (state.tab === 'sales' || state.tab === 'recettes' || state.tab === 'profiles') {
+      loadWorkspace({ light: true })
         .then(() => { render(); })
         .catch((error) => showToast(error.message, 'err'));
     }
@@ -1473,7 +1537,7 @@ app.addEventListener('click', async (event) => {
       if (action === 'sync-router') {
         showToast('Chargement des forfaits…', 'ok');
         const result = await api(`/api/admin/routers/${routerId}/sync`, { method: 'POST', body: {} });
-        state.profilesRouterId = routerId;
+        applyScopeRouter(routerId);
         state.tab = 'profiles';
         showToast(`${result.count} forfait(s) chargé(s).`, 'ok');
         await loadWorkspace();
@@ -1552,6 +1616,17 @@ app.addEventListener('change', async (event) => {
     after: () => { state.busy = false; },
   });
 });
+
+if (scopeRouterSelect) {
+  scopeRouterSelect.addEventListener('change', async () => {
+    applyScopeRouter(scopeRouterSelect.value);
+    try {
+      await refresh('', { light: true });
+    } catch (error) {
+      showToast(error.message, 'err');
+    }
+  });
+}
 
 logoutButton.addEventListener('click', async () => {
   await api('/api/logout', { method: 'POST', body: {} }).catch(() => {});

@@ -491,6 +491,7 @@ app.addEventListener('click', async (event) => {
     state.screen = 'list';
     await runBusyRender(render, () => loadForfaits().catch(() => {}), {
       resetScroll: true,
+      quiet: Boolean(state.forfaits && state.forfaits.length),
       busyLabel: 'Chargement…',
       before: () => { state.busy = true; },
       after: () => { state.busy = false; },
@@ -504,6 +505,11 @@ app.addEventListener('click', async (event) => {
       state.verifyResult = null;
     }
     if (state.screen !== 'actifs') stopActifsPoll();
+    const hasList = state.forfaits && state.forfaits.length;
+    const hasReport = Boolean(state.report);
+    const quiet = (state.screen === 'list' && hasList)
+      || (state.screen === 'history' && hasReport)
+      || (state.screen === 'actifs' && state.actifs);
     const loader = state.screen === 'history'
       ? () => loadSales()
       : (state.screen === 'actifs' ? () => loadActifs() : () => loadForfaits());
@@ -514,6 +520,7 @@ app.addEventListener('click', async (event) => {
       try { await loader(); } catch (error) { showToast(error.message, 'err'); }
     }, {
       resetScroll: true,
+      quiet,
       busyLabel,
       before: () => { state.busy = true; },
       after: () => { state.busy = false; },

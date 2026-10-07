@@ -50,12 +50,12 @@ function normalizeUsername(value) {
 }
 
 function normalizeResellerName(name) {
-  return String(name || '').trim().toUpperCase().replace(/\s+/g, '');
+  return String(name || '').trim().replace(/\s+/g, ' ').toUpperCase();
 }
 
 function validateResellerName(name) {
-  if (!/^[A-Z0-9]{1,32}$/.test(name)) {
-    return 'Le nom sur le ticket ne contient que des lettres et des chiffres, comme GOGOUNA.';
+  if (!/^[A-Z0-9]+(?: [A-Z0-9]+)*$/.test(name) || name.length > 40) {
+    return 'Le nom sur le ticket accepte lettres, chiffres et espaces, comme HORIZON TEAM.';
   }
   return '';
 }
@@ -733,7 +733,8 @@ function transactionDone(tx) {
 function openDatabase() {
   if (!openDatabase.promise) {
     openDatabase.promise = new Promise((resolve, reject) => {
-      const request = indexedDB.open('opus', 3);
+      // v4 : store « settings » (prévu pour licences). Ne jamais redescendre sous la version déjà ouverte sur l’appareil.
+      const request = indexedDB.open('opus', 4);
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains('admins')) {
@@ -762,6 +763,9 @@ function openDatabase() {
         // Mémoire des remises faites via « Vendre » (AP), même après import du script.
         if (!db.objectStoreNames.contains('app_marks')) {
           db.createObjectStore('app_marks', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('settings')) {
+          db.createObjectStore('settings', { keyPath: 'id' });
         }
       };
       request.onsuccess = () => resolve(request.result);
@@ -804,7 +808,7 @@ async function deleteOne(storeName, key) {
   await transactionDone(tx);
 }
 
-const backupStores = ['admins', 'routers', 'profiles', 'resellers', 'stock', 'sales', 'assigned', 'app_marks'];
+const backupStores = ['admins', 'routers', 'profiles', 'resellers', 'stock', 'sales', 'assigned', 'app_marks', 'settings'];
 
 async function replaceDatabase(snapshot) {
   const db = await openDatabase();
@@ -830,7 +834,9 @@ async function importSnapshot(snapshot) {
   if (!snapshot || snapshot.opus !== 1 || !Array.isArray(snapshot.admins) || snapshot.admins.length === 0) {
     throw new Error('Cette copie est inutilisable.');
   }
-  const required = backupStores.filter((name) => name !== 'assigned' && name !== 'app_marks');
+  const required = backupStores.filter((name) => (
+    name !== 'assigned' && name !== 'app_marks' && name !== 'settings'
+  ));
   if (!required.every((name) => Array.isArray(snapshot[name]))) {
     throw new Error('Cette copie est inutilisable.');
   }
@@ -838,6 +844,7 @@ async function importSnapshot(snapshot) {
     ...snapshot,
     assigned: Array.isArray(snapshot.assigned) ? snapshot.assigned : [],
     app_marks: Array.isArray(snapshot.app_marks) ? snapshot.app_marks : [],
+    settings: Array.isArray(snapshot.settings) ? snapshot.settings : [],
   });
   const currency = String(snapshot.currency || '');
   if (['XOF', 'CDF', 'EUR', 'USD'].includes(currency)) localStorage.setItem('opus.currency', currency);
@@ -1570,7 +1577,10 @@ function commentMatchesName(comment, name) {
   const text = commentKey(stripAppCommentMark(comment));
   const wanted = commentKey(name);
   if (!text || !wanted) return false;
-  return text === wanted || text.endsWith(`-${wanted}`);
+  if (text === wanted || text.endsWith(`-${wanted}`)) return true;
+  const compactText = text.replace(/\s+/g, '');
+  const compactWanted = wanted.replace(/\s+/g, '');
+  return compactText === compactWanted || compactText.endsWith(`-${compactWanted}`);
 }
 
 async function exactCommentOwners(routerId) {
@@ -2563,7 +2573,7 @@ async function handle(method, url, body) {
     const portNumber = Number(body.port || 8728);
     const username = String(body.username || '').trim();
     const password = String(body.password || '');
-    if (!name || name.length > 64) return fail(400, 'Indiquez le nom du PTP.');
+    if (!name || name.length > 64) return fail(400, 'Indiquez le nom du routeur.');
     if (!host || host.length > 253) return fail(400, 'Indiquez l\'adresse Wi-Fi du point de vente.');
     if (adminHost && adminHost.length > 253) return fail(400, 'Adresse distante trop longue.');
     if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
@@ -2720,7 +2730,7 @@ async function handle(method, url, body) {
     const nameError = validateResellerName(hmpName);
     if (nameError) return fail(400, nameError);
     const router = await getOne('routers', routerId);
-    if (!router) return fail(400, 'Choisissez le routeur du PTP.');
+    if (!router) return fail(400, 'Choisissez le routeur.');
     if (host && host.length > 253) return fail(400, 'Adresse du revendeur trop longue.');
     if (await passwordAlreadyUsed(password)) return fail(400, 'Ce mot de passe est déjà utilisé.');
     const ratePercent = parseRatePercent(body.ratePercent);
@@ -2730,7 +2740,7 @@ async function handle(method, url, body) {
     const month = currentMonthKey();
     const hmpCode = generateResellerCode(await usedCodesForMonth(month));
     const id = await putOne('resellers', {
-      username: `${hmpName.toLowerCase()}-${Date.now().toString(36)}`,
+      username: `${hmpName.toLowerCase().replace(/\s+/g, '')}-${Date.now().toString(36)}`,
       password_hash: await hashPassword(password),
       hmp_code: hmpCode,
       hmp_codes: { [month]: { '*': hmpCode } },
@@ -2775,7 +2785,7 @@ async function handle(method, url, body) {
     }
     if (Object.prototype.hasOwnProperty.call(body, 'routerId')) {
       const routerId = Number(body.routerId);
-      if (!(await getOne('routers', routerId))) return fail(400, 'Choisissez le routeur du PTP.');
+      if (!(await getOne('routers', routerId))) return fail(400, 'Choisissez le routeur.');
       if (Number(current.router_id) !== routerId) identityChanged = true;
       current.router_id = routerId;
     }

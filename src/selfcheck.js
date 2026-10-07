@@ -1,6 +1,6 @@
 import net from 'node:net';
 import assert from 'node:assert/strict';
-import { parseProfileScript, formatSaleComment, generateResellerCode, isLimitUptime } from './hmp.js';
+import { parseProfileScript, formatSaleComment, generateResellerCode, isLimitUptime, normalizeResellerName, validateResellerName } from './hmp.js';
 import { encodeSentence, takeSentence } from './protocol.js';
 import { createHotspotUser, fetchProfiles } from './mikrotik.js';
 
@@ -80,6 +80,9 @@ const comment = formatSaleComment({
   timeZone: 'UTC',
 });
 assert.equal(comment, 'vc-864-11.03.25-GOGOUNA');
+assert.equal(normalizeResellerName('Horizon   team'), 'HORIZON TEAM');
+assert.equal(validateResellerName('HORIZON TEAM'), '');
+assert.ok(validateResellerName('HORIZON-TEAM'));
 const generated = generateResellerCode(['864', '856']);
 assert.match(generated, /^\d{3,}$/);
 assert.notEqual(generated, '864');

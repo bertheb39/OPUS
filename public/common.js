@@ -100,18 +100,13 @@ function showAppBusy(message = 'Chargement…') {
     root.innerHTML = `
       <div class="app-busy-card">
         <div class="app-busy-stage" aria-hidden="true">
-          <span class="app-busy-ring app-busy-ring-a"></span>
-          <span class="app-busy-ring app-busy-ring-b"></span>
-          <span class="app-busy-core"></span>
+          <span class="app-busy-ring"></span>
         </div>
         <p class="app-busy-label" data-app-busy-label></p>
-        <div class="app-busy-bars" aria-hidden="true">
-          <span></span><span></span><span></span>
-        </div>
       </div>
     `;
     document.body.appendChild(root);
-    requestAnimationFrame(() => root.classList.add('is-on'));
+    root.classList.add('is-on');
   } else {
     root.classList.add('is-on');
   }
@@ -127,18 +122,13 @@ function hideAppBusy() {
   if (!root) return;
   root.classList.remove('is-on');
   root.setAttribute('aria-busy', 'false');
-  const remove = () => {
-    if (appBusyDepth > 0) return;
-    root.remove();
-  };
-  root.addEventListener('transitionend', remove, { once: true });
-  setTimeout(remove, 320);
+  root.remove();
 }
 
 async function runBusyRender(renderFn, task, options = {}) {
   const reset = Boolean(options.resetScroll);
   const top = reset ? 0 : rememberSheetScroll();
-  const busyLabel = options.busyLabel || options.message || '';
+  const busyLabel = options.quiet ? '' : (options.busyLabel || options.message || '');
   if (busyLabel) showAppBusy(busyLabel);
   if (typeof options.before === 'function') options.before();
   renderFn(reset ? { resetScroll: true } : {});

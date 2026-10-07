@@ -26,7 +26,7 @@ export function parseProfileScript(script) {
 }
 
 export function normalizeResellerName(name) {
-  return String(name || '').trim().toUpperCase().replace(/\s+/g, '');
+  return String(name || '').trim().replace(/\s+/g, ' ').toUpperCase();
 }
 
 export function normalizeResellerCode(code) {
@@ -34,8 +34,8 @@ export function normalizeResellerCode(code) {
 }
 
 export function validateResellerName(name) {
-  if (!/^[A-Z0-9]{1,32}$/.test(name)) {
-    return 'Le nom sur le ticket ne contient que des lettres et des chiffres, comme GOGOUNA.';
+  if (!/^[A-Z0-9]+(?: [A-Z0-9]+)*$/.test(name) || name.length > 40) {
+    return 'Le nom sur le ticket accepte lettres, chiffres et espaces, comme HORIZON TEAM.';
   }
   return '';
 }
