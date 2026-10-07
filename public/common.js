@@ -86,6 +86,24 @@ function rememberSheetScroll() {
   return root ? root.scrollTop : 0;
 }
 
+function placeAppDock(html) {
+  const current = document.getElementById('app-dock');
+  if (!html) {
+    if (current) current.remove();
+    return;
+  }
+  const box = document.createElement('div');
+  box.innerHTML = String(html).trim();
+  const next = box.firstElementChild;
+  if (!next) {
+    if (current) current.remove();
+    return;
+  }
+  next.id = 'app-dock';
+  if (current) current.replaceWith(next);
+  else document.body.appendChild(next);
+}
+
 let appBusyDepth = 0;
 
 function showAppBusy(message = 'Chargement…') {
@@ -273,7 +291,7 @@ async function api(url, options = {}) {
   return localApi(url, options);
 }
 
-const APP_VERSION = '2.8.2';
+const APP_VERSION = '2.8.3';
 const UPDATE_REPO = 'bertheb39/OPUS';
 const activityKey = 'opus.activity';
 const currencyKey = 'opus.currency';

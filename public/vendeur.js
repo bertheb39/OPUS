@@ -180,7 +180,6 @@ function renderList() {
       ` : ''}
       ${cards || '<section class="card"><p class="meta">Aucun forfait.</p></section>'}
     </div>
-    ${dock('list')}
   `;
 }
 
@@ -206,7 +205,6 @@ function renderTicket() {
       </div>
     </section>
     </div>
-    ${dock('list')}
   `;
 }
 
@@ -222,7 +220,6 @@ function renderVerifySold() {
         <button class="btn-block" type="button" data-action="close-ticket">Fermer</button>
       </section>
     </div>
-    ${dock('list')}
   `;
 }
 
@@ -300,7 +297,6 @@ function renderHistory() {
       ${state.busy && !report ? '<p class="meta">Chargement…</p>' : (items || '<p class="meta">Aucune connexion sur cette période.</p>')}
     </section>
     </div>
-    ${dock('history')}
   `;
 }
 
@@ -322,7 +318,6 @@ function renderActifs() {
       <div data-actifs-body>${state.busy && !state.actifs ? '<p class="meta">Chargement…</p>' : actifsTableHtml(list, { admin: false })}</div>
     </section>
     </div>
-    ${dock('actifs')}
   `;
 }
 
@@ -334,13 +329,20 @@ function render(options = {}) {
     if (adminLink) adminLink.hidden = !isOwner();
     if (!state.authed) {
       renderLogin();
+      if (typeof placeAppDock === 'function') placeAppDock('');
       return;
     }
+    let screen = 'list';
     if (state.screen === 'verify' && state.verifyResult) renderVerifySold();
     else if (state.screen === 'ticket' && state.ticket) renderTicket();
-    else if (state.screen === 'history') renderHistory();
-    else if (state.screen === 'actifs') renderActifs();
-    else renderList();
+    else if (state.screen === 'history') {
+      screen = 'history';
+      renderHistory();
+    } else if (state.screen === 'actifs') {
+      screen = 'actifs';
+      renderActifs();
+    } else renderList();
+    if (typeof placeAppDock === 'function') placeAppDock(dock(screen));
   };
   if (state.authed && typeof preserveSheetScroll === 'function') {
     preserveSheetScroll(paint, Boolean(options.resetScroll));

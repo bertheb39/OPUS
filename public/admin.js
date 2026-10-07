@@ -874,7 +874,8 @@ function renderApp() {
           <h2>Chargement…</h2>
           <p class="meta">Préparation des données locales.</p>
         </section>
-      </div>${dock()}`;
+      </div>`;
+    if (typeof placeAppDock === 'function') placeAppDock(dock());
     return;
   }
   const body = {
@@ -887,7 +888,8 @@ function renderApp() {
     clients: typeof renderClients === 'function' ? renderClients : () => '',
   }[state.tab]();
   const licenseCard = typeof licenseStatusCardHtml === 'function' ? licenseStatusCardHtml() : '';
-  app.innerHTML = `<div class="sheet">${licenseCard}${body}</div>${dock()}`;
+  app.innerHTML = `<div class="sheet">${licenseCard}${body}</div>`;
+  if (typeof placeAppDock === 'function') placeAppDock(dock());
 }
 
 function render(options = {}) {
@@ -909,6 +911,7 @@ function render(options = {}) {
     else if (state.resettingPassword && !state.authed) renderPasswordReset();
     else if (!state.authed) renderLogin();
     else renderApp();
+    if (!state.authed && typeof placeAppDock === 'function') placeAppDock('');
     if (state.authed && typeof paintLicenseExpiryNotice === 'function') paintLicenseExpiryNotice();
   };
   if (state.authed && typeof preserveSheetScroll === 'function') {
