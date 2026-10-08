@@ -46,6 +46,8 @@ function licenseWorkspaceId() {
 function rememberWorkspaceLicense(record) {
   if (!record?.code) return;
   if (record.workspaceId) localStorage.setItem(workspaceIdKey, record.workspaceId);
+  let previous = {};
+  try { previous = JSON.parse(localStorage.getItem(workspaceLicenseKey) || '{}'); } catch { previous = {}; }
   localStorage.setItem(workspaceLicenseKey, JSON.stringify({
     code: record.code,
     clientName: record.clientName || '',
@@ -54,7 +56,110 @@ function rememberWorkspaceLicense(record) {
     endsAt: record.endsAt || '',
     workspaceId: record.workspaceId || localStorage.getItem(workspaceIdKey) || '',
     checkedAt: record.checkedAt || Date.now(),
+    quotaKeep: record.quotaKeep != null ? String(record.quotaKeep) : String(previous.quotaKeep || ''),
   }));
+}
+
+function parseQuotaKeep(raw) {
+  const text = String(raw || '');
+  if (!text.startsWith('kept:')) return null;
+  const [plan, routerPart, resellerPart] = text.slice(5).split(';');
+  if (!plan || routerPart == null) return null;
+  const ids = (part) => String(part || '').split(',').map((item) => Number(item)).filter((id) => Number.isInteger(id) && id > 0);
+  return { pending: false, plan, routers: ids(routerPart), resellers: ids(resellerPart) };
+}
+
+function quotaHoldRecord() {
+  const raw = String(workspaceLicenseRecord()?.quotaKeep || '');
+  if (raw.startsWith('pending:')) {
+    const plan = raw.slice(8);
+    return plan ? { pending: true, plan, routers: [], resellers: [] } : null;
+  }
+  return parseQuotaKeep(raw);
+}
+
+function resellerDroppedByPlan(resellerId) {
+  const hold = quotaHoldRecord();
+  if (!hold) return false;
+  if (hold.pending) return true;
+  return !hold.resellers.includes(Number(resellerId));
+}
+
+function routerParkedByPlan(routerId) {
+  const hold = quotaHoldRecord();
+  if (!hold) return false;
+  if (hold.pending) return true;
+  return !hold.routers.includes(Number(routerId));
+}
+
+function workspaceExceedsRights(routers, resellers, rights) {
+  if (!rights) return false;
+  if ((routers || []).length > rights.maxRouters || (resellers || []).length > rights.maxResellers) return true;
+  const counts = new Map();
+  for (const reseller of resellers || []) {
+    const routerId = Number(reseller.routerId != null ? reseller.routerId : reseller.router_id);
+    const count = (counts.get(routerId) || 0) + 1;
+    counts.set(routerId, count);
+    if (count > rights.maxResellersPerRouter) return true;
+  }
+  return false;
+}
+
+function quotaHoldFitsPlan(plan, rights, routers, resellers) {
+  const hold = quotaHoldRecord();
+  if (!hold || hold.pending || hold.plan !== plan || !rights) return false;
+  const liveRouters = new Set((routers || []).map((router) => Number(router.id)));
+  const liveResellers = new Set((resellers || []).map((reseller) => Number(reseller.id)));
+  const keptRouters = hold.routers.filter((id) => liveRouters.has(id));
+  const keptResellers = hold.resellers.filter((id) => liveResellers.has(id));
+  if (keptRouters.length > rights.maxRouters || keptResellers.length > rights.maxResellers) return false;
+  const keptRouterSet = new Set(keptRouters);
+  const perRouter = new Map();
+  for (const reseller of resellers || []) {
+    const id = Number(reseller.id);
+    if (!liveResellers.has(id) || !hold.resellers.includes(id)) continue;
+    const routerId = Number(reseller.routerId != null ? reseller.routerId : reseller.router_id);
+    if (!keptRouterSet.has(routerId)) return false;
+    const count = (perRouter.get(routerId) || 0) + 1;
+    if (count > rights.maxResellersPerRouter) return false;
+    perRouter.set(routerId, count);
+  }
+  return true;
+}
+
+async function writeQuotaKeep(quotaKeep) {
+  const record = workspaceLicenseRecord();
+  if (!record?.code) return;
+  rememberWorkspaceLicense({ ...record, quotaKeep });
+  if (!firebaseLicenseReady()) return;
+  const id = record.workspaceId || localStorage.getItem(workspaceIdKey);
+  if (!id) return;
+  await firestoreRequest(
+    `${workspaceStatusUrl(id)}&updateMask.fieldPaths=quotaKeep`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields: { quotaKeep: { stringValue: quotaKeep } } }),
+    },
+  );
+}
+
+async function publishQuotaKeep(plan, routerIds, resellerIds) {
+  const routers = (routerIds || []).map((id) => Number(id)).filter((id) => id > 0).join(',');
+  const resellers = (resellerIds || []).map((id) => Number(id)).filter((id) => id > 0).join(',');
+  await writeQuotaKeep(`kept:${plan};${routers};${resellers}`);
+}
+
+async function ensureQuotaPending(plan) {
+  if (!plan) return;
+  const raw = String(workspaceLicenseRecord()?.quotaKeep || '');
+  if (raw === `pending:${plan}`) return;
+  await writeQuotaKeep(`pending:${plan}`);
+}
+
+async function clearQuotaHold() {
+  if (!String(workspaceLicenseRecord()?.quotaKeep || '')) return;
+  await writeQuotaKeep('');
 }
 
 function workspaceStatusUrl(id) {
@@ -722,6 +827,205 @@ function planPeriodPriceLabel(plan, months) {
   return planPriceLabel({ price: String(monthly * value) });
 }
 
+function planPriceNumber(raw) {
+  const text = String(raw ?? '').replace(/\s/g, '').replace(',', '.');
+  if (!text) return null;
+  const amount = Number(text);
+  return Number.isFinite(amount) ? amount : null;
+}
+
+function planMoneyAmount(plan, months) {
+  if (!plan) return null;
+  const value = Math.max(1, Number(months) || 1);
+  const packaged = value === 3 ? plan.price3 : (value === 12 ? plan.price12 : '');
+  if ((value === 3 || value === 12) && packaged !== '' && packaged != null) {
+    return planPriceNumber(packaged);
+  }
+  return plan.price === '' || plan.price == null ? null : (() => {
+    const monthly = planPriceNumber(plan.price);
+    return monthly == null ? null : monthly * value;
+  })();
+}
+
+function licenseDayCount(start, end) {
+  const from = new Date(`${String(start || '').slice(0, 10)}T00:00:00`);
+  const to = new Date(`${String(end || '').slice(0, 10)}T00:00:00`);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return 0;
+  return Math.max(0, Math.round((to.getTime() - from.getTime()) / 86400000));
+}
+
+function prepaidMonthsUntil(endsAt, today) {
+  const end = String(endsAt || '').slice(0, 10);
+  const start = String(today || licenseToday()).slice(0, 10);
+  if (!end || !start || end < start) return 0;
+  let months = 0;
+  let cursor = start;
+  while (months < 36) {
+    const next = licenseAddMonths(cursor, 1);
+    if (!next || next <= cursor || next > end) break;
+    months += 1;
+    cursor = next;
+  }
+  return months;
+}
+
+function licenseUpgradeQuote(cache, nextPlan, plans, extraMonths = 0) {
+  if (!cache || !nextPlan) return null;
+  const planId = String(cache.plan || '').trim().toLowerCase();
+  if (!planId || planId === 'essai' || planId === 'fondateur' || planId === nextPlan.id) return null;
+  if (cache.status && String(cache.status).toLowerCase() !== 'active') return null;
+  const endsAt = String(cache.endsAt || '').slice(0, 10);
+  const today = licenseToday();
+  if (!endsAt || endsAt < today) return null;
+  const currentPlan = (plans || []).find((item) => item.id === planId);
+  if (!currentPlan) return null;
+  const oldMonthly = planPriceNumber(currentPlan.price);
+  const newMonthly = planPriceNumber(nextPlan.price);
+  if (oldMonthly == null || newMonthly == null || newMonthly <= oldMonthly) return null;
+  const fullMonths = prepaidMonthsUntil(endsAt, today);
+  let complement = 0;
+  let partialDays = 0;
+  if (fullMonths >= 1) {
+    const from = planMoneyAmount(currentPlan, fullMonths);
+    const to = planMoneyAmount(nextPlan, fullMonths);
+    if (from == null || to == null || to <= from) return null;
+    complement = to - from;
+  } else {
+    partialDays = licenseDayCount(today, endsAt);
+    const monthDays = Math.max(1, licenseDayCount(today, licenseAddMonths(today, 1)));
+    complement = Math.round((newMonthly - oldMonthly) * partialDays / monthDays);
+  }
+  const extra = [0, 1, 3, 12].includes(Number(extraMonths)) ? Number(extraMonths) : 0;
+  const extraAmount = extra ? (planMoneyAmount(nextPlan, extra) || 0) : 0;
+  const due = complement + extraAmount;
+  if (due <= 0) return null;
+  return {
+    months: fullMonths,
+    partialDays,
+    extra,
+    complement,
+    extraAmount,
+    due,
+    endsAt: extra ? licenseAddMonths(endsAt, extra) : endsAt,
+    keptEndsAt: endsAt,
+    plan: nextPlan.id,
+    fromPlan: planId,
+  };
+}
+
+function paymentProofSrc(value) {
+  const text = String(value || '');
+  return /^data:image\/(jpeg|png|webp);base64,[a-z0-9+/=]+$/i.test(text) ? text : '';
+}
+
+function readPaymentProof(file) {
+  if (!file) return Promise.reject(new Error('Joignez la capture d’écran du paiement.'));
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    const url = URL.createObjectURL(file);
+    image.onload = () => {
+      const max = 960;
+      const scale = Math.min(1, max / Math.max(image.width, image.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(image.width * scale));
+      canvas.height = Math.max(1, Math.round(image.height * scale));
+      const context = canvas.getContext('2d');
+      if (!context) {
+        URL.revokeObjectURL(url);
+        reject(new Error('Image illisible.'));
+        return;
+      }
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      let quality = 0.7;
+      let data = canvas.toDataURL('image/jpeg', quality);
+      while (data.length > 700000 && quality > 0.4) {
+        quality = Math.round((quality - 0.1) * 10) / 10;
+        data = canvas.toDataURL('image/jpeg', quality);
+      }
+      if (!paymentProofSrc(data) || data.length > 900000) {
+        reject(new Error('La capture est trop lourde. Choisissez une image plus petite.'));
+        return;
+      }
+      resolve(data);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Image illisible.'));
+    };
+    image.src = url;
+  });
+}
+
+function canProlongSubscription(cache) {
+  const plan = String(cache?.plan || '').trim().toLowerCase();
+  if (!plan || plan === 'essai' || plan === 'fondateur') return false;
+  const status = String(cache?.status || 'active').toLowerCase();
+  return status !== 'revoked' && status !== 'suspended';
+}
+
+function subscriptionLicenseRecord() {
+  const cache = readLicenseCache() || {};
+  const shared = typeof readSharedWorkspaceLicense === 'function' ? (readSharedWorkspaceLicense() || {}) : {};
+  return {
+    ...shared,
+    ...cache,
+    code: cache.code || shared.code || '',
+    plan: cache.plan || shared.plan || '',
+    status: cache.status || shared.status || '',
+    endsAt: cache.endsAt || shared.endsAt || '',
+    clientName: cache.clientName || shared.clientName || '',
+  };
+}
+
+function formatUpgradeDue(amount) {
+  return typeof money === 'function' ? money(amount) : String(amount);
+}
+
+function upgradeChoiceText(cache, plan, plans, extraMonths) {
+  const quote = licenseUpgradeQuote(cache, plan, plans, extraMonths);
+  if (!quote) return '';
+  const fromName = licensePlanLabel(quote.fromPlan);
+  const until = formatLicenseDate(quote.endsAt);
+  if (quote.partialDays && quote.extra) {
+    return `Passage de ${fromName} à ${plan.name} aujourd’hui. ${quote.partialDays} jours restants : complément ${formatUpgradeDue(quote.complement)}. Plus ${periodLabel(quote.extra)} : ${formatUpgradeDue(quote.extraAmount)}. À payer : ${formatUpgradeDue(quote.due)}. La liaison continue jusqu’au ${until}.`;
+  }
+  if (quote.partialDays) {
+    return `Passage de ${fromName} à ${plan.name}. Complément des ${quote.partialDays} jours restants : ${formatUpgradeDue(quote.due)}. Fin le ${until}. Ajoutez un mois pour continuer sans coupure.`;
+  }
+  if (quote.extra) {
+    return `Passage de ${fromName} à ${plan.name}. Complément ${formatUpgradeDue(quote.complement)}, plus ${periodLabel(quote.extra)} à ${formatUpgradeDue(quote.extraAmount)}. À payer : ${formatUpgradeDue(quote.due)}. La liaison continue jusqu’au ${until}.`;
+  }
+  return `Passage de ${fromName} à ${plan.name}. À payer : ${formatUpgradeDue(quote.due)}. Fin inchangée le ${until}.`;
+}
+
+function pendingUpgradeLabel(cache, pending, plans) {
+  const next = (plans || []).find((item) => item.id === pending?.plan);
+  const extra = pending?.extraMonths === '' || pending?.extraMonths == null ? 0 : Number(pending.extraMonths);
+  const text = upgradeChoiceText(cache, next, plans, extra);
+  return text || periodLabel(pending?.months);
+}
+
+function offerAskView(cache, plan, plans) {
+  const quote = licenseUpgradeQuote(cache, plan, plans, 0);
+  if (!quote) {
+    return {
+      price: `${planPeriodPriceLabel(plan, 1)} / mois`,
+      meta: plan.blurb || LICENSE_RIGHTS[plan.id]?.blurb || '',
+    };
+  }
+  if (quote.partialDays) {
+    return {
+      price: `${planPeriodPriceLabel(plan, 1)} / mois`,
+      meta: plan.blurb || LICENSE_RIGHTS[plan.id]?.blurb || '',
+    };
+  }
+  return {
+    price: `Complément ${formatUpgradeDue(quote.due)}`,
+    meta: `Passage depuis ${licensePlanLabel(quote.fromPlan)} · fin le ${formatLicenseDate(quote.endsAt)}`,
+  };
+}
+
 async function loadPublicPlans() {
   const merged = new Map(defaultSubscriptionPlans().map((item) => [item.id, item]));
   try {
@@ -761,11 +1065,16 @@ async function sendLicenseRequest(payload) {
           clientName: { stringValue: payload.clientName },
           phone: { stringValue: payload.phone },
           plan: { stringValue: payload.plan },
-          months: { stringValue: String(normalizePeriodMonths(payload.months)) },
+          months: { stringValue: String(payload.upgrade === '1' ? Number(payload.extraMonths || 0) : normalizePeriodMonths(payload.months)) },
+          extraMonths: { stringValue: payload.upgrade === '1' ? String(Number(payload.extraMonths || 0)) : '' },
           status: { stringValue: 'pending' },
           createdAt: { stringValue: new Date().toISOString() },
           deviceId: { stringValue: licenseDeviceId() },
-          currentCode: { stringValue: cache?.code || '' },
+          currentCode: { stringValue: payload.currentCode || cache?.code || '' },
+          upgrade: { stringValue: payload.upgrade === '1' ? '1' : '0' },
+          upgradeDue: { stringValue: String(payload.upgradeDue || '') },
+          upgradeEndsAt: { stringValue: String(payload.upgradeEndsAt || '') },
+          proof: { stringValue: String(payload.proof || '') },
         },
       }),
     },
@@ -795,6 +1104,11 @@ async function fetchLicenseRequest(id) {
     months: firestoreString(fields, 'months') || '1',
     status: firestoreString(fields, 'status') || 'pending',
     code: firestoreString(fields, 'code'),
+    upgrade: firestoreString(fields, 'upgrade'),
+    upgradeDue: firestoreString(fields, 'upgradeDue'),
+    upgradeEndsAt: firestoreString(fields, 'upgradeEndsAt'),
+    extraMonths: firestoreString(fields, 'extraMonths'),
+    proof: firestoreString(fields, 'proof'),
   };
 }
 
@@ -948,9 +1262,15 @@ async function refreshSubscriptionModal(root) {
       location.reload();
       return;
     }
+    if (pending?.status === 'rejected') {
+      localStorage.removeItem(licenseRequestKey);
+      pending = null;
+      showToast('Demande rejetée. Vous pouvez en envoyer une autre.', 'err', 7000);
+    }
   }
   const plans = await loadPublicPlans();
-  const cache = readLicenseCache();
+  const cache = subscriptionLicenseRecord();
+  const prolong = canProlongSubscription(cache);
   root.innerHTML = `
     <section class="modal modal-form" role="dialog" aria-modal="true">
       <h2>Mon abonnement</h2>
@@ -961,32 +1281,48 @@ async function refreshSubscriptionModal(root) {
       ${cache?.code && !String(cache.code).startsWith('HT-ESSAI') && cache.plan !== 'fondateur'
         ? `<p class="meta">Votre code : <strong data-own-license-code>${esc(cache.code)}</strong> <button type="button" class="btn-quiet" data-copy-license-code>Copier</button></p>`
         : ''}
+      ${prolong && !(pending && pending.status === 'pending') ? `
+        <div class="actions">
+          <button type="button" class="btn-sell" data-prolong>Prolonger mon abonnement</button>
+        </div>
+        <p class="meta">Reconduit ${esc(licensePlanLabel(cache.plan))} au tarif plein, à la suite de la période déjà payée. La liaison ne s’interrompt pas.</p>
+      ` : ''}
       ${pending && pending.status === 'pending'
-        ? `<p class="meta">Demande <strong>${esc(licensePlanLabel(pending.plan))}</strong> · ${esc(periodLabel(pending.months))} envoyée. Elle s’activera dès validation du paiement.</p>`
+        ? `<p class="meta">Demande <strong>${esc(licensePlanLabel(pending.plan))}</strong> · ${esc(pendingUpgradeLabel(cache, pending, plans))} envoyée. Elle s’activera dès validation du paiement.</p>`
         : `
       <div class="license-offers" data-license-offers>
-        ${plans.map((plan) => `
+        ${plans.map((plan) => {
+          const ask = offerAskView(cache, plan, plans);
+          return `
           <button type="button" class="license-offer" data-pick-plan="${esc(plan.id)}">
             <strong>${esc(plan.name)}</strong>
-            <span>${esc(planPeriodPriceLabel(plan, 1))} / mois</span>
-            <span class="meta">${esc(plan.blurb || LICENSE_RIGHTS[plan.id]?.blurb || '')}</span>
+            <span>${esc(ask.price)}</span>
+            <span class="meta">${esc(ask.meta)}</span>
           </button>
-        `).join('')}
+        `;
+        }).join('')}
       </div>
       <form data-license-request-form class="stack" hidden>
         <input type="hidden" name="plan" value="">
         <input type="hidden" name="months" value="1">
-        <p class="meta">Durée</p>
-        <div class="license-periods">
-          ${SUBSCRIPTION_PERIODS.map((period) => `
-            <button type="button" class="license-period${period.months === 1 ? ' is-on' : ''}" data-pick-period="${period.months}">${esc(period.label)}</button>
-          `).join('')}
+        <div data-request-duration>
+          <p class="meta" data-duration-label>Durée</p>
+          <div class="license-periods">
+            <button type="button" class="license-period" data-pick-period="0" hidden>Le reste</button>
+            ${SUBSCRIPTION_PERIODS.map((period) => `
+              <button type="button" class="license-period${period.months === 1 ? ' is-on' : ''}" data-pick-period="${period.months}">${esc(period.label)}</button>
+            `).join('')}
+          </div>
         </div>
         <p><strong data-request-choice></strong></p>
         <label>Nom et prénom</label>
         <input name="clientName" required value="${esc(cache?.clientName || '')}" placeholder="Nom et prénom" autocomplete="name">
         <label>Téléphone</label>
         <input name="phone" required placeholder="Téléphone" inputmode="tel" autocomplete="tel">
+        <label>Capture du paiement</label>
+        <input name="proof" type="file" accept="image/*" required>
+        <p class="meta">Photo ou capture du reçu. Elle est vérifiée avant l’activation.</p>
+        <img data-proof-preview hidden alt="Aperçu de la capture" class="payment-proof">
         <p class="meta" data-request-status hidden></p>
         <button class="btn-sell" type="submit">Envoyer la demande</button>
       </form>`}
@@ -1033,12 +1369,45 @@ async function refreshSubscriptionModal(root) {
     if (!form) return;
     const plan = plans.find((item) => item.id === form.elements.plan.value);
     if (!plan) return;
-    const months = normalizePeriodMonths(form.elements.months.value);
-    form.querySelector('[data-request-choice]').textContent = `${plan.name} · ${periodLabel(months)} · ${planPeriodPriceLabel(plan, months)}`;
+    const picked = Number(form.elements.months.value);
+    const quote = licenseUpgradeQuote(cache, plan, plans, [0, 1, 3, 12].includes(picked) ? picked : 0);
+    const duration = form.querySelector('[data-request-duration]');
+    const label = form.querySelector('[data-duration-label]');
+    const rest = form.querySelector('[data-pick-period="0"]');
+    if (duration) duration.hidden = false;
+    if (label) label.textContent = quote ? 'Mois en plus' : 'Durée';
+    if (rest) rest.hidden = !quote;
+    const choice = form.querySelector('[data-request-choice]');
+    if (quote) {
+      choice.textContent = upgradeChoiceText(cache, plan, plans, quote.extra);
+    } else {
+      const months = normalizePeriodMonths(form.elements.months.value);
+      const samePlan = String(cache?.plan || '').trim().toLowerCase() === plan.id && canProlongSubscription(cache);
+      const anchor = cache?.endsAt && cache.endsAt >= licenseToday() ? cache.endsAt : licenseToday();
+      const renewedEnd = samePlan ? licenseAddMonths(anchor, months) : '';
+      choice.textContent = samePlan
+        ? `Prolongation de ${plan.name}. ${periodLabel(months)} : ${planPeriodPriceLabel(plan, months)}. La liaison continue jusqu’au ${formatLicenseDate(renewedEnd)}.`
+        : `${plan.name} · ${periodLabel(months)} · ${planPeriodPriceLabel(plan, months)}`;
+    }
     form.querySelectorAll('[data-pick-period]').forEach((item) => {
-      item.classList.toggle('is-on', Number(item.dataset.pickPeriod) === months);
+      item.classList.toggle('is-on', Number(item.dataset.pickPeriod) === Number(form.elements.months.value));
     });
   };
+  root.querySelector('[data-prolong]')?.addEventListener('click', () => {
+    const planId = String(cache?.plan || '').trim().toLowerCase();
+    const plan = plans.find((item) => item.id === planId);
+    if (!plan || !form) {
+      showToast('Cette offre n’est plus au catalogue.', 'err');
+      return;
+    }
+    root.querySelectorAll('.license-offer').forEach((item) => {
+      item.classList.toggle('is-on', item.dataset.pickPlan === plan.id);
+    });
+    form.hidden = false;
+    form.elements.plan.value = plan.id;
+    form.elements.months.value = '1';
+    paintChoice();
+  });
   root.querySelectorAll('[data-pick-plan]').forEach((button) => {
     button.addEventListener('click', () => {
       const plan = plans.find((item) => item.id === button.dataset.pickPlan);
@@ -1046,14 +1415,29 @@ async function refreshSubscriptionModal(root) {
       root.querySelectorAll('.license-offer').forEach((item) => item.classList.toggle('is-on', item === button));
       form.hidden = false;
       form.elements.plan.value = plan.id;
+      const base = licenseUpgradeQuote(cache, plan, plans, 0);
+      form.elements.months.value = base?.partialDays ? '1' : (base ? '0' : '1');
       paintChoice();
     });
   });
   root.querySelectorAll('[data-pick-period]').forEach((button) => {
     button.addEventListener('click', () => {
       if (!form) return;
-      form.elements.months.value = String(normalizePeriodMonths(button.dataset.pickPeriod));
+      form.elements.months.value = button.dataset.pickPeriod;
       paintChoice();
+    });
+  });
+  form?.elements.proof?.addEventListener('change', () => {
+    const file = form.elements.proof.files[0];
+    const preview = form.querySelector('[data-proof-preview]');
+    if (!file || !preview) return;
+    readPaymentProof(file).then((src) => {
+      preview.src = src;
+      preview.hidden = false;
+    }).catch((error) => {
+      preview.hidden = true;
+      preview.removeAttribute('src');
+      showToast(error.message, 'err');
     });
   });
   form?.addEventListener('submit', async (event) => {
@@ -1067,11 +1451,22 @@ async function refreshSubscriptionModal(root) {
       status.textContent = 'Envoi…';
     }
     try {
+      const paid = subscriptionLicenseRecord();
+      const plan = plans.find((item) => item.id === String(data.plan || ''));
+      const picked = [0, 1, 3, 12].includes(Number(data.months)) ? Number(data.months) : 0;
+      const quote = licenseUpgradeQuote(paid, plan, plans, picked);
+      const proof = await readPaymentProof(form.elements.proof.files[0]);
       await sendLicenseRequest({
         clientName: String(data.clientName || '').trim(),
         phone: String(data.phone || '').trim(),
         plan: String(data.plan || ''),
-        months: data.months,
+        months: quote ? quote.extra : data.months,
+        extraMonths: quote ? quote.extra : '',
+        currentCode: paid.code,
+        proof,
+        upgrade: quote ? '1' : '0',
+        upgradeDue: quote ? String(quote.due) : '',
+        upgradeEndsAt: quote ? quote.endsAt : '',
       });
       showToast('Demande envoyée.', 'ok');
       await refreshSubscriptionModal(root);
@@ -1129,6 +1524,12 @@ async function openSubscriptionModal() {
     if (!id) return;
     try {
       const pending = await fetchLicenseRequest(id);
+      if (pending?.status === 'rejected') {
+        localStorage.removeItem(licenseRequestKey);
+        showToast('Demande rejetée. Vous pouvez en envoyer une autre.', 'err', 7000);
+        refreshSubscriptionModal(document.getElementById('subscription-modal')).catch(() => {});
+        return;
+      }
       if (pending && await applyAcceptedLicense(pending)) {
         closeSubscriptionModal();
         location.reload();
@@ -1335,6 +1736,9 @@ async function hydrateWorkspaceLicense() {
           status: firestoreString(fields, 'status'),
           endsAt: firestoreString(fields, 'endsAt'),
           workspaceId,
+          quotaKeep: fields.quotaKeep
+            ? firestoreString(fields, 'quotaKeep')
+            : (workspaceLicenseRecord()?.quotaKeep || ''),
         };
         if (live.code) rememberWorkspaceLicense({ ...workspaceLicenseRecord(), ...live });
       }

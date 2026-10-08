@@ -88,7 +88,31 @@ function holdBanner() {
 }
 
 function salesFrozen() {
-  return typeof licenseBlocksLiveOps === 'function' && licenseBlocksLiveOps();
+  if (typeof licenseBlocksLiveOps === 'function' && licenseBlocksLiveOps()) return true;
+  return typeof resellerDroppedByPlan === 'function' && state.me?.id && resellerDroppedByPlan(state.me.id);
+}
+
+function showResellerCutGate() {
+  const dropped = typeof resellerDroppedByPlan === 'function' && state.me?.id && resellerDroppedByPlan(state.me.id);
+  if (!dropped) {
+    document.getElementById('quota-gate')?.remove();
+    document.body.classList.remove('quota-locked');
+    return;
+  }
+  if (document.getElementById('quota-gate')) return;
+  const overlay = document.createElement('div');
+  overlay.id = 'quota-gate';
+  overlay.className = 'update-gate';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.innerHTML = `
+    <section class="quota-gate-card">
+      <h1>Compte hors offre</h1>
+      <p>Ce compte reste enregistré, mais il ne communique plus. La vente reprend si l’administrateur l’inclut dans une offre.</p>
+    </section>
+  `;
+  document.body.classList.add('quota-locked');
+  document.body.appendChild(overlay);
 }
 
 function renderSellCard(row) {
@@ -343,6 +367,7 @@ function render(options = {}) {
       renderActifs();
     } else renderList();
     if (typeof placeAppDock === 'function') placeAppDock(dock(screen));
+    showResellerCutGate();
   };
   if (state.authed && typeof preserveSheetScroll === 'function') {
     preserveSheetScroll(paint, Boolean(options.resetScroll));
@@ -742,7 +767,8 @@ async function boot() {
     render();
     state.me = await api('/api/vendeur/me');
     state.authed = true;
-    await loadForfaits();
+    const dropped = typeof resellerDroppedByPlan === 'function' && resellerDroppedByPlan(state.me.id);
+    if (!dropped) await loadForfaits();
     markActivity();
     idleLogout.done = false;
   } catch (error) {

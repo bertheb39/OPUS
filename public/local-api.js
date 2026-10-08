@@ -1381,6 +1381,18 @@ function licenseOpsFrozen() {
   return typeof licenseBlocksLiveOps === 'function' && licenseBlocksLiveOps();
 }
 
+async function workspaceOverPlan() {
+  if (typeof currentLicensePlan !== 'function' || typeof licenseRights !== 'function') return false;
+  if (typeof workspaceExceedsRights !== 'function' || typeof quotaHoldFitsPlan !== 'function') return false;
+  const plan = currentLicensePlan();
+  if (!plan || plan === 'essai' || plan === 'fondateur') return false;
+  if (typeof licenseFrozen === 'function' && licenseFrozen()) return false;
+  const rights = licenseRights();
+  const [routers, resellers] = await Promise.all([getAll('routers'), getAll('resellers')]);
+  if (!workspaceExceedsRights(routers, resellers, rights)) return false;
+  return !quotaHoldFitsPlan(plan, rights, routers, resellers);
+}
+
 function licenseFrozenMessage() {
   return typeof licenseLiveOpsMessage === 'function'
     ? licenseLiveOpsMessage()
@@ -1460,6 +1472,11 @@ async function routerRun(router, commands, timeoutMs) {
   if (licenseOpsFrozen()) {
     const error = new Error(licenseFrozenMessage());
     error.code = 'LICENSE';
+    throw error;
+  }
+  if (typeof routerParkedByPlan === 'function' && routerParkedByPlan(router?.id)) {
+    const error = new Error('Ce routeur est hors offre. La communication est coupée.');
+    error.code = 'QUOTA';
     throw error;
   }
   const hosts = routerHosts(router);
@@ -2038,6 +2055,7 @@ async function syncHapSales({ resellerId = 0, routerId = 0, from = '', to = '', 
         readOk += 1;
         read += entries.length;
       } catch (error) {
+        if (error?.code === 'QUOTA') continue;
         warnings.push(`${baseRouter.name || 'Routeur'} : ${error.message || 'scripts inaccessibles'}`);
         continue;
       }
@@ -2214,7 +2232,7 @@ async function activeUsersView({ resellerId = 0, routerId = 0 } = {}) {
     try {
       rows = await listActiveSessions(router);
     } catch (error) {
-      warning = error.message || 'Impossible de lire les sessions actives.';
+      if (error?.code !== 'QUOTA') warning = error.message || 'Impossible de lire les sessions actives.';
       continue;
     }
     const paidCodes = new Set();
@@ -2674,6 +2692,20 @@ async function handle(method, url, body) {
 
   if (path.startsWith('/api/admin') && !admin) return fail(401, 'Connexion requise.');
   if (path.startsWith('/api/vendeur') && !resellerSession) return fail(401, 'Connexion requise.');
+  if (resellerSession && path.startsWith('/api/vendeur') && path !== '/api/vendeur/me') {
+    const parkedReseller = typeof resellerDroppedByPlan === 'function' && resellerDroppedByPlan(resellerSession.id);
+    const parkedRouter = typeof routerParkedByPlan === 'function'
+      && routerParkedByPlan((await getOne('resellers', resellerSession.id))?.router_id);
+    if (parkedReseller || parkedRouter) {
+      return fail(403, 'Ce compte est hors offre. La communication est coupée.');
+    }
+  }
+
+  if (admin && path.startsWith('/api/admin') && method !== 'GET' && path !== '/api/admin/quota-trim' && path !== '/api/admin/password') {
+    if (await workspaceOverPlan()) {
+      return fail(403, 'Choisissez les routeurs et les revendeurs à garder pour votre offre.');
+    }
+  }
 
   if (licenseOpsFrozen() && method !== 'GET') {
     const allowedWhenFrozen = new Set(['/api/logout', '/api/settings/license', '/api/admin/password']);
@@ -2785,6 +2817,43 @@ async function handle(method, url, body) {
     if (password) current.password = password;
     await putOne('routers', current);
     return ok({ router: publicRouter(current) });
+  }
+
+  if (method === 'POST' && path === '/api/admin/quota-trim') {
+    if (typeof licenseRights !== 'function' || typeof currentLicensePlan !== 'function') {
+      return fail(400, 'Ajustement indisponible.');
+    }
+    const plan = currentLicensePlan();
+    if (!plan || plan === 'essai' || plan === 'fondateur') return fail(400, 'Aucun ajustement à faire sur cette offre.');
+    if (!(await workspaceOverPlan())) return fail(400, 'Aucun ajustement à faire.');
+    const rights = licenseRights();
+    const keepRouters = [...new Set((body.routerIds || []).map((id) => Number(id)))].filter((id) => Number.isInteger(id) && id > 0);
+    const keepResellers = [...new Set((body.resellerIds || []).map((id) => Number(id)))].filter((id) => Number.isInteger(id) && id > 0);
+    const routers = await getAll('routers');
+    const resellers = await getAll('resellers');
+    const routerIds = new Set(routers.map((router) => Number(router.id)));
+    const resellerById = new Map(resellers.map((reseller) => [Number(reseller.id), reseller]));
+    if (keepRouters.some((id) => !routerIds.has(id))) return fail(400, 'Routeur inconnu.');
+    if (keepResellers.some((id) => !resellerById.has(id))) return fail(400, 'Revendeur inconnu.');
+    if (keepRouters.length > rights.maxRouters) {
+      return fail(400, `Votre offre autorise ${rights.maxRouters} routeur(s).`);
+    }
+    if (keepResellers.length > rights.maxResellers) {
+      return fail(400, `Votre offre autorise ${rights.maxResellers} revendeur(s).`);
+    }
+    const perRouter = new Map();
+    for (const id of keepResellers) {
+      const reseller = resellerById.get(id);
+      if (!keepRouters.includes(Number(reseller.router_id))) {
+        return fail(400, 'Un revendeur gardé doit rester sur un routeur gardé.');
+      }
+      const count = (perRouter.get(Number(reseller.router_id)) || 0) + 1;
+      perRouter.set(Number(reseller.router_id), count);
+      if (count > rights.maxResellersPerRouter) {
+        return fail(400, `Votre offre autorise ${rights.maxResellersPerRouter} revendeur(s) sur ce routeur.`);
+      }
+    }
+    return ok({ ok: true, keptRouters: keepRouters, keptResellers: keepResellers });
   }
 
   if (routerMatch && method === 'DELETE') {
@@ -3316,6 +3385,7 @@ async function handle(method, url, body) {
     if (!reseller || reseller.active !== 1) return fail(403, 'Compte désactivé.');
     const router = await getOne('routers', reseller.router_id);
     return ok({
+      id: reseller.id,
       name: reseller.hmp_name,
       routerName: router ? router.name : '',
       routerHost: resellerReachHost(router, reseller),

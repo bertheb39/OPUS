@@ -188,10 +188,11 @@ function renderRouters() {
     return `
       <article class="card">
         <h2>${esc(router.name)}</h2>
+        ${routerParked(router.id) ? '<p class="meta">Hors offre — communication coupée. La configuration reste.</p>' : ''}
         <p class="meta">${esc(router.host)}${router.admin_host ? ` · VPN ${esc(router.admin_host)}` : ''} · ${esc(router.username)}</p>
         <div class="actions">
-          <button type="button" data-action="test-router" data-id="${router.id}" ${state.busy ? 'disabled' : ''}>${state.busy && state.busyAction === `test-${router.id}` ? 'Test…' : 'Tester'}</button>
-          <button type="button" data-action="sync-router" data-id="${router.id}" ${state.busy ? 'disabled' : ''}>Forfaits</button>
+          <button type="button" data-action="test-router" data-id="${router.id}" ${state.busy || routerParked(router.id) ? 'disabled' : ''}>${state.busy && state.busyAction === `test-${router.id}` ? 'Test…' : 'Tester'}</button>
+          <button type="button" data-action="sync-router" data-id="${router.id}" ${state.busy || routerParked(router.id) ? 'disabled' : ''}>Forfaits</button>
           <button type="button" class="btn-quiet" data-action="edit-router" data-id="${router.id}" ${state.busy ? 'disabled' : ''}>Modifier</button>
           <button type="button" class="btn-danger" data-action="delete-router" data-id="${router.id}" ${state.busy ? 'disabled' : ''}>Supprimer</button>
         </div>
@@ -323,8 +324,9 @@ function renderResellers() {
       <article class="card" data-reseller-card="${reseller.id}">
         <div class="profile-head">
           <h2>${esc(reseller.hmpName)}</h2>
-          <span class="meta">${reseller.active ? 'actif' : 'off'}</span>
+          <span class="meta">${resellerParked(reseller.id) ? 'hors offre' : (reseller.active ? 'actif' : 'off')}</span>
         </div>
+        ${resellerParked(reseller.id) ? '<p class="meta">Hors offre — communication coupée. Le compte reste enregistré.</p>' : ''}
         <p class="meta">${esc(reseller.routerName)} · ${esc(reseller.reachHost || reseller.host || '—')}</p>
         <p class="meta">Mois : ${esc(reseller.soldCount)} · ${esc(money(reseller.soldAmount))}${reseller.ratePercent == null ? '' : ` · ${esc(reseller.ratePercent)} %`}</p>
         ${reseller.ratePercent != null ? `<p class="meta"><strong>Part ${esc(reseller.hmpName)}</strong> ${esc(money(reseller.resellerShare || 0))} · <strong>À ${esc(reseller.routerName || 'réseau')}</strong> ${esc(money(reseller.networkShare || 0))}</p>` : ''}
@@ -332,10 +334,10 @@ function renderResellers() {
         ${codes ? `<p class="meta">Codes ${esc(reseller.monthKey || '')} : ${codes}</p>` : ''}
         ${stock}
         <div class="actions">
-          <button type="button" class="btn-sell" data-action="invite-reseller" data-id="${reseller.id}" ${state.busy ? 'disabled' : ''}>
+          <button type="button" class="btn-sell" data-action="invite-reseller" data-id="${reseller.id}" ${state.busy || resellerParked(reseller.id) ? 'disabled' : ''}>
             Inviter
           </button>
-          <button type="button" class="btn-quiet" data-action="toggle-lot" data-id="${reseller.id}">
+          <button type="button" class="btn-quiet" data-action="toggle-lot" data-id="${reseller.id}" ${resellerParked(reseller.id) ? 'disabled' : ''}>
             ${state.lotOpen === reseller.id ? 'Fermer' : 'Attribuer'}
           </button>
           <button type="button" class="${reseller.active ? 'btn-danger' : 'btn-quiet'}" data-action="toggle-reseller" data-id="${reseller.id}" data-active="${reseller.active ? '0' : '1'}">
@@ -982,6 +984,7 @@ async function loadWorkspace(options = {}) {
   if (state.tab === 'sales') loadUsage();
   if (state.tab === 'recettes') await loadRecettes({ sync: syncRecettes });
   if (state.tab === 'actifs') loadActifs();
+  enforceQuotaChoice();
 }
 
 async function loadRecettes(options = {}) {
@@ -1781,6 +1784,214 @@ async function idleLogout() {
   clearOwner();
   sessionStorage.setItem('opus.notice', 'Session fermée après 15 minutes sans utilisation.');
   location.replace('index.html');
+}
+
+function quotaRights() {
+  if (typeof currentLicensePlan !== 'function' || typeof licenseRights !== 'function') return null;
+  const plan = currentLicensePlan();
+  if (!plan || plan === 'essai' || plan === 'fondateur') return null;
+  if (typeof licenseFrozen === 'function' && licenseFrozen()) return null;
+  return licenseRights();
+}
+
+let quotaSuggest = null;
+
+function routerParked(routerId) {
+  return typeof routerParkedByPlan === 'function' && routerParkedByPlan(routerId);
+}
+
+function resellerParked(resellerId) {
+  return typeof resellerDroppedByPlan === 'function' && resellerDroppedByPlan(resellerId);
+}
+
+function quotaChoiceNeeded() {
+  const rights = quotaRights();
+  if (!rights || typeof workspaceExceedsRights !== 'function' || typeof quotaHoldFitsPlan !== 'function') return false;
+  const routers = state.routers || [];
+  const resellers = state.resellers || [];
+  if (!workspaceExceedsRights(routers, resellers, rights)) return false;
+  return !quotaHoldFitsPlan(currentLicensePlan(), rights, routers, resellers);
+}
+
+async function enforceQuotaChoice() {
+  if (typeof loadPublicPlans === 'function') {
+    try { await loadPublicPlans(); } catch { /* plafonds locaux */ }
+  }
+  const closeGate = () => {
+    document.getElementById('quota-gate')?.remove();
+    document.body.classList.remove('quota-locked');
+  };
+  if (!state.authed || typeof currentLicensePlan !== 'function') {
+    closeGate();
+    return;
+  }
+  const plan = currentLicensePlan();
+  const hold = typeof quotaHoldRecord === 'function' ? quotaHoldRecord() : null;
+  if (typeof licenseFrozen === 'function' && licenseFrozen()) {
+    closeGate();
+    return;
+  }
+  const rights = quotaRights();
+  const routers = state.routers || [];
+  const resellers = state.resellers || [];
+  const exceeds = rights && typeof workspaceExceedsRights === 'function'
+    && workspaceExceedsRights(routers, resellers, rights);
+  if (!exceeds) {
+    if (hold && typeof clearQuotaHold === 'function') await clearQuotaHold().catch(() => {});
+    quotaSuggest = null;
+    closeGate();
+    return;
+  }
+  if (hold && !hold.pending && typeof quotaHoldFitsPlan === 'function' && quotaHoldFitsPlan(plan, rights, routers, resellers)) {
+    quotaSuggest = null;
+    closeGate();
+    return;
+  }
+  if (hold && !hold.pending) quotaSuggest = hold;
+  if (typeof ensureQuotaPending === 'function') await ensureQuotaPending(plan).catch(() => {});
+  const gate = document.getElementById('quota-gate');
+  if (gate && gate.dataset.plan === plan) return;
+  gate?.remove();
+  openQuotaChoiceGate();
+}
+
+function openQuotaChoiceGate() {
+  const rights = quotaRights();
+  if (!rights) return;
+  const overlay = document.createElement('div');
+  overlay.id = 'quota-gate';
+  overlay.className = 'update-gate';
+  overlay.dataset.plan = typeof currentLicensePlan === 'function' ? currentLicensePlan() : '';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  document.body.classList.add('quota-locked');
+  document.body.appendChild(overlay);
+  paintQuotaChoice(overlay, rights);
+}
+
+function paintQuotaChoice(overlay, rights) {
+  const routers = state.routers || [];
+  const resellers = state.resellers || [];
+  const pickRouters = routers.length > rights.maxRouters;
+  const suggestRouters = new Set((quotaSuggest && quotaSuggest.routers) || []);
+  const suggestResellers = new Set((quotaSuggest && quotaSuggest.resellers) || []);
+  const routerBoxes = routers.map((router) => `
+    <label class="check-line">
+      <input type="checkbox" name="keep-router" value="${router.id}" ${pickRouters ? (suggestRouters.has(Number(router.id)) ? 'checked' : '') : 'checked data-locked disabled'}>
+      ${esc(router.name)}
+    </label>
+  `).join('');
+  const resellerBoxes = resellers.map((reseller) => `
+    <label class="check-line">
+      <input type="checkbox" name="keep-reseller" value="${reseller.id}" data-router="${reseller.routerId}" ${suggestResellers.has(Number(reseller.id)) ? 'checked' : ''}>
+      ${esc(reseller.hmpName)} <span class="meta">${esc(reseller.routerName || '')}</span>
+    </label>
+  `).join('');
+  overlay.innerHTML = `
+    <section class="quota-gate-card">
+      <h1>Choisissez ce que l’offre inclut</h1>
+      <p>Votre offre autorise ${esc(rights.maxRouters)} routeur(s) et ${esc(rights.maxResellers)} revendeur(s). Cochez ceux qui communiquent. Les autres restent enregistrés, avec leur configuration, mais ne communiquent plus. Une offre plus large pourra les reprendre sans les recréer.</p>
+      <form class="stack">
+        ${pickRouters ? `<h2>Routeurs</h2>${routerBoxes}` : routerBoxes}
+        <h2>Revendeurs</h2>
+        ${resellerBoxes || '<p class="meta">Aucun revendeur.</p>'}
+        <p class="meta" data-quota-count></p>
+        <p class="meta" data-quota-error hidden></p>
+        <button type="submit" class="btn-sell btn-block">Continuer</button>
+      </form>
+    </section>
+  `;
+  const form = overlay.querySelector('form');
+  const refreshLimits = () => {
+    const trimChecked = (inputs, max) => {
+      const chosen = inputs.filter((input) => input.checked);
+      while (chosen.length > max) chosen.pop().checked = false;
+    };
+    trimChecked([...form.querySelectorAll('[name="keep-router"]:not([data-locked])')], rights.maxRouters);
+    const routerOn = new Set([...form.querySelectorAll('[name="keep-router"]:checked')].map((input) => input.value));
+    form.querySelectorAll('[name="keep-router"]:not([data-locked])').forEach((input) => {
+      input.disabled = !input.checked && routerOn.size >= rights.maxRouters;
+    });
+    form.querySelectorAll('[name="keep-reseller"]').forEach((input) => {
+      const routerKept = !pickRouters || routerOn.has(input.dataset.router);
+      if (!routerKept) input.checked = false;
+    });
+    const byRouter = new Map();
+    [...form.querySelectorAll('[name="keep-reseller"]')].forEach((input) => {
+      const list = byRouter.get(input.dataset.router) || [];
+      list.push(input);
+      byRouter.set(input.dataset.router, list);
+    });
+    byRouter.forEach((inputs) => trimChecked(inputs, rights.maxResellersPerRouter));
+    trimChecked([...form.querySelectorAll('[name="keep-reseller"]')], rights.maxResellers);
+    const keptResellers = [...form.querySelectorAll('[name="keep-reseller"]:checked')];
+    const perRouter = new Map();
+    keptResellers.forEach((input) => {
+      const routerId = input.dataset.router;
+      perRouter.set(routerId, (perRouter.get(routerId) || 0) + 1);
+    });
+    form.querySelectorAll('[name="keep-reseller"]').forEach((input) => {
+      const routerKept = !pickRouters || routerOn.has(input.dataset.router);
+      const onThisRouter = perRouter.get(input.dataset.router) || 0;
+      input.disabled = !routerKept || (!input.checked && (
+        keptResellers.length >= rights.maxResellers
+        || onThisRouter >= rights.maxResellersPerRouter
+      ));
+    });
+    const count = overlay.querySelector('[data-quota-count]');
+    const chosenRouters = pickRouters ? routerOn.size : routers.length;
+    const chosenResellers = form.querySelectorAll('[name="keep-reseller"]:checked').length;
+    if (count) count.textContent = `${chosenRouters} / ${rights.maxRouters} routeurs · ${chosenResellers} / ${rights.maxResellers} revendeurs`;
+  };
+  form.addEventListener('change', refreshLimits);
+  refreshLimits();
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const routerIds = [...form.querySelectorAll('[name="keep-router"]:checked')].map((input) => Number(input.value));
+    const resellerIds = [...form.querySelectorAll('[name="keep-reseller"]:checked')].map((input) => Number(input.value));
+    const error = overlay.querySelector('[data-quota-error]');
+    if (routerIds.length > rights.maxRouters || resellerIds.length > rights.maxResellers) {
+      error.hidden = false;
+      error.textContent = 'Vous avez coché plus que l’offre ne le permet.';
+      return;
+    }
+    const droppedRouters = routers.filter((router) => !routerIds.includes(Number(router.id)));
+    const droppedResellers = resellers.filter((reseller) => !resellerIds.includes(Number(reseller.id)));
+    const names = [
+      ...droppedRouters.map((router) => `Routeur ${router.name}`),
+      ...droppedResellers.map((reseller) => `Revendeur ${reseller.hmpName}`),
+    ];
+    overlay.innerHTML = `
+      <section class="quota-gate-card">
+        <h1>Couper la communication</h1>
+        <p>Ces éléments restent enregistrés. Ils ne communiquent plus tant que l’offre ne les inclut pas :</p>
+        <ul>${names.map((name) => `<li>${esc(name)}</li>`).join('') || '<li>Aucun</li>'}</ul>
+        <p>Aucune reconfiguration ne sera nécessaire pour les reprendre avec une offre qui les couvre.</p>
+        <div class="modal-actions">
+          <button type="button" class="btn-quiet" data-quota-back>Revenir</button>
+          <button type="button" class="btn-sell" data-quota-confirm>Couper la communication</button>
+        </div>
+      </section>
+    `;
+    overlay.querySelector('[data-quota-back]').addEventListener('click', () => paintQuotaChoice(overlay, rights));
+    overlay.querySelector('[data-quota-confirm]').addEventListener('click', async () => {
+      const button = overlay.querySelector('[data-quota-confirm]');
+      button.disabled = true;
+      try {
+        await api('/api/admin/quota-trim', { method: 'POST', body: { routerIds, resellerIds } });
+        if (typeof publishQuotaKeep === 'function') await publishQuotaKeep(currentLicensePlan(), routerIds, resellerIds);
+        quotaSuggest = null;
+        overlay.remove();
+        document.body.classList.remove('quota-locked');
+        showToast('Communication coupée pour les comptes non choisis. Ils restent enregistrés.', 'ok', 6000);
+        await loadWorkspace({ light: true });
+        render();
+      } catch (err) {
+        button.disabled = false;
+        showToast(err.message || 'Suppression impossible.', 'err', 6000);
+      }
+    });
+  });
 }
 
 async function boot() {

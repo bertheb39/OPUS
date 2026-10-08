@@ -769,6 +769,33 @@ body.update-locked > *:not(#update-gate) {
   user-select: none;
 }
 
+.quota-gate-card {
+  width: min(420px, 100%);
+  max-height: calc(100% - 24px);
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  background: #fff;
+  color: var(--ink);
+  border-radius: 16px;
+  padding: 16px;
+  text-align: left;
+}
+
+.quota-gate-card h1,
+.quota-gate-card h2 {
+  text-align: center;
+}
+
+.quota-gate-card ul {
+  margin: 0 0 12px;
+  padding-left: 18px;
+}
+
+body.quota-locked > *:not(#quota-gate) {
+  pointer-events: none;
+  user-select: none;
+}
+
 .license-gate {
   position: fixed;
   inset: 0;
@@ -813,6 +840,29 @@ body.update-locked > *:not(#update-gate) {
 .license-offer.is-on {
   border-color: var(--brand-dark, #12324f);
   background: #e8eef6;
+}
+
+.payment-proof {
+  display: block;
+  width: 100%;
+  max-height: 240px;
+  object-fit: contain;
+  margin: 8px 0;
+  background: #f4f7fb;
+  border-radius: 12px;
+}
+
+.payment-proof-full {
+  max-height: 70vh;
+}
+
+.proof-open {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
 }
 
 .license-request {
@@ -881,6 +931,51 @@ body.has-dock main > .modal-overlay > .modal {
   text-align: left;
   padding: 16px 14px 12px;
   border-radius: 18px 18px 12px 12px;
+}
+
+#subscription-modal .actions {
+  display: block;
+}
+
+#subscription-modal [data-prolong] {
+  width: 100%;
+  white-space: nowrap;
+  margin-top: 2px;
+  padding: 12px 16px;
+  border: 2px solid transparent;
+  border-radius: 12px;
+  background:
+    linear-gradient(var(--sell), var(--sell)) padding-box,
+    conic-gradient(
+      from var(--prolong-angle),
+      #5eead4,
+      #38bdf8,
+      #818cf8,
+      #e879f9,
+      #fb7185,
+      #fbbf24,
+      #4ade80,
+      #5eead4
+    ) border-box;
+  background-clip: padding-box, border-box;
+  animation: prolong-border 2.6s linear infinite;
+  letter-spacing: 0.01em;
+}
+
+@property --prolong-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@keyframes prolong-border {
+  to { --prolong-angle: 360deg; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #subscription-modal [data-prolong] {
+    animation: none;
+  }
 }
 
 #subscription-modal .license-offers {

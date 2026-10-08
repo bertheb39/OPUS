@@ -151,6 +151,64 @@ async function patchLicenseClient(code, patch) {
   if (!response.ok) throw new Error('Mise à jour refusée.');
 }
 
+function clientForLicenseRequest(item) {
+  const clients = state.licenseClients || [];
+  const code = typeof normalizeLicenseCode === 'function' ? normalizeLicenseCode(item.currentCode) : String(item.currentCode || '');
+  if (code && !code.startsWith('HT-ESSAI')) {
+    const found = clients.find((client) => client.code === code);
+    if (found) return found;
+  }
+  const digits = (value) => String(value || '').replace(/\D/g, '');
+  const wanted = digits(item.phone);
+  if (wanted.length >= 8) {
+    const byPhone = clients.find((client) => {
+      const phone = digits(client.phone);
+      return phone.length >= 8
+        && phone.slice(-8) === wanted.slice(-8)
+        && client.plan
+        && client.plan !== 'essai'
+        && client.plan !== 'fondateur'
+        && client.status !== 'revoked'
+        && client.status !== 'suspended';
+    });
+    if (byPhone) return byPhone;
+  }
+  return null;
+}
+
+function requestOfferLine(item) {
+  const plans = state.licensePlans || [];
+  const next = plans.find((plan) => plan.id === item.plan);
+  const current = clientForLicenseRequest(item);
+  const extra = item.extraMonths === '' || item.extraMonths == null ? 0 : Number(item.extraMonths);
+  const quote = current && next && typeof licenseUpgradeQuote === 'function'
+    ? licenseUpgradeQuote(current, next, plans, extra)
+    : null;
+  if (quote) {
+    const due = typeof money === 'function' ? money(quote.due) : String(quote.due);
+    const until = typeof formatLicenseDate === 'function' ? formatLicenseDate(quote.endsAt) : quote.endsAt;
+    const fromName = typeof licensePlanLabel === 'function' ? licensePlanLabel(quote.fromPlan) : quote.fromPlan;
+    const toName = next?.name || item.plan;
+    if (quote.partialDays && quote.extra) {
+      const complement = typeof money === 'function' ? money(quote.complement) : String(quote.complement);
+      const added = typeof money === 'function' ? money(quote.extraAmount) : String(quote.extraAmount);
+      return `Passage ${fromName} → ${toName}. ${quote.partialDays} jours : ${complement}. + ${quote.extra} mois : ${added}. À encaisser : ${due}. Liaison jusqu’au ${until}.`;
+    }
+    if (quote.extra) {
+      return `Passage ${fromName} → ${toName}. À encaisser : ${due}. La liaison continue jusqu’au ${until}.`;
+    }
+    return `Passage ${fromName} → ${toName}. Complément à encaisser : ${due}. Fin inchangée le ${until}.`;
+  }
+  if (item.upgrade === '1' && item.upgradeEndsAt) {
+    const due = typeof money === 'function' ? money(Number(item.upgradeDue)) : String(item.upgradeDue || '');
+    const until = typeof formatLicenseDate === 'function' ? formatLicenseDate(item.upgradeEndsAt) : item.upgradeEndsAt;
+    return `Passage vers ${next?.name || item.plan}. Complément à encaisser : ${due}. Fin inchangée le ${until}.`;
+  }
+  const price = next && typeof planPeriodPriceLabel === 'function' ? planPeriodPriceLabel(next, item.months) : '';
+  const period = typeof periodLabel === 'function' ? periodLabel(item.months) : `${item.months || 1} mois`;
+  return `${next?.name || item.plan} · ${period}${price ? ` · ${price}` : ''}`;
+}
+
 function renderClients() {
   if (!isFounderOperator()) {
     return `
@@ -216,12 +274,22 @@ function renderClients() {
       <label class="check-line"><input type="checkbox" name="active_${esc(plan.id)}" ${plan.active !== '0' ? 'checked' : ''}> Visible pour les clients</label>
     </article>
   `).join('');
-  const requestRows = pending.map((item) => `
+  const requestRows = pending.map((item) => {
+    const proof = typeof paymentProofSrc === 'function' ? paymentProofSrc(item.proof) : '';
+    return `
     <article class="card">
-      <p><strong>${esc(item.clientName)}</strong> · ${esc(item.phone)} · ${esc(item.plan)} · ${esc(typeof periodLabel === 'function' ? periodLabel(item.months) : `${item.months || 1} mois`)}</p>
-      <button type="button" data-action="request-accept" data-id="${esc(item.id)}">Paiement reçu — activer</button>
+      <p><strong>${esc(item.clientName)}</strong> · ${esc(item.phone)}</p>
+      <p>${esc(requestOfferLine(item))}</p>
+      ${proof
+        ? `<button type="button" class="proof-open" data-action="request-proof" data-id="${esc(item.id)}"><img class="payment-proof" src="${proof}" alt="Capture du paiement"></button>`
+        : '<p class="meta">Aucune capture jointe.</p>'}
+      <div class="actions">
+        <button type="button" data-action="request-accept" data-id="${esc(item.id)}">Paiement reçu — activer</button>
+        <button type="button" class="btn-danger" data-action="request-reject" data-id="${esc(item.id)}">Rejeter</button>
+      </div>
     </article>
-  `).join('');
+  `;
+  }).join('');
   return `
     <section class="card">
       <h2>Tarifs des abonnements</h2>
@@ -597,6 +665,11 @@ async function loadLicenseRequests() {
       code: firestoreString(fields, 'code'),
       deviceId: firestoreString(fields, 'deviceId'),
       currentCode: firestoreString(fields, 'currentCode'),
+      upgrade: firestoreString(fields, 'upgrade'),
+      upgradeDue: firestoreString(fields, 'upgradeDue'),
+      upgradeEndsAt: firestoreString(fields, 'upgradeEndsAt'),
+      extraMonths: firestoreString(fields, 'extraMonths'),
+      proof: firestoreString(fields, 'proof'),
     };
   }).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
 }
@@ -607,16 +680,28 @@ async function acceptLicenseRequest(id) {
   const months = typeof normalizePeriodMonths === 'function' ? normalizePeriodMonths(request.months) : Number(request.months) || 1;
   let start = licenseToday();
   let code = normalizeLicenseCode(request.currentCode);
+  const named = typeof clientForLicenseRequest === 'function' ? clientForLicenseRequest(request) : null;
+  if (!code && named?.code) code = normalizeLicenseCode(named.code);
   const fromEssai = !code || code.startsWith('HT-ESSAI');
   const current = fromEssai
     ? null
-    : (state.licenseClients || []).find((item) => item.code === code);
-  if (current && current.plan !== 'essai' && current.endsAt && current.endsAt >= start) {
+    : (named || (state.licenseClients || []).find((item) => item.code === code));
+  const nextPlan = (state.licensePlans || []).find((item) => item.id === request.plan);
+  const extra = request.extraMonths === '' || request.extraMonths == null ? 0 : Number(request.extraMonths);
+  const quote = current && typeof licenseUpgradeQuote === 'function'
+    ? licenseUpgradeQuote(current, nextPlan, state.licensePlans || [], extra)
+    : null;
+  const keptEnd = request.upgrade === '1' && request.upgradeEndsAt
+    ? request.upgradeEndsAt
+    : (quote ? quote.endsAt : '');
+  if (!keptEnd && current && current.plan !== 'essai' && current.endsAt && current.endsAt >= start) {
     start = current.endsAt;
   }
-  const endsAt = typeof licenseAddMonths === 'function'
-    ? licenseAddMonths(start, months)
-    : defaultEndForPlan(request.plan, months);
+  const endsAt = keptEnd
+    ? keptEnd
+    : (typeof licenseAddMonths === 'function'
+      ? licenseAddMonths(start, months)
+      : defaultEndForPlan(request.plan, months));
   if (fromEssai) code = '';
   if (code && (state.licenseClients || []).some((item) => item.code === code)) {
     await patchLicenseClient(code, {
@@ -653,6 +738,14 @@ async function acceptLicenseRequest(id) {
     }).catch(() => {});
   }
   return { code };
+}
+
+async function rejectLicenseRequest(id) {
+  const response = await operatorFirestore(`license_requests/${encodeURIComponent(id)}?updateMask.fieldPaths=status`, {
+    method: 'PATCH',
+    body: JSON.stringify(licenseFieldsPayload({ status: 'rejected' })),
+  });
+  if (!response.ok) throw new Error('Rejet impossible.');
 }
 
 async function refreshLicenseClients() {
@@ -744,6 +837,41 @@ if (app) {
         hideAppBusy();
         render();
       }
+      return;
+    }
+    const reject = event.target.closest('[data-action="request-reject"]');
+    if (reject) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      state.busy = true;
+      showAppBusy('Rejet…');
+      try {
+        await rejectLicenseRequest(reject.dataset.id);
+        await refreshLicenseClients();
+        showToast('Demande rejetée.', 'ok');
+      } catch (error) {
+        showToast(error.message, 'err');
+      } finally {
+        state.busy = false;
+        hideAppBusy();
+        render();
+      }
+      return;
+    }
+    const proofButton = event.target.closest('[data-action="request-proof"]');
+    if (proofButton) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const item = (state.licenseRequests || []).find((request) => request.id === proofButton.dataset.id);
+      const src = item && typeof paymentProofSrc === 'function' ? paymentProofSrc(item.proof) : '';
+      if (!src) return;
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.innerHTML = `<section class="modal modal-form"><img class="payment-proof payment-proof-full" src="${src}" alt="Capture du paiement"><div class="modal-actions"><button type="button" class="btn-quiet" data-close-proof>Fermer</button></div></section>`;
+      overlay.addEventListener('click', (click) => {
+        if (click.target === overlay || click.target.closest('[data-close-proof]')) overlay.remove();
+      });
+      document.body.appendChild(overlay);
       return;
     }
     const button = event.target.closest('[data-action^="client-"]');
