@@ -93,7 +93,7 @@ public class RouterOsPlugin extends Plugin {
     @PluginMethod
     public void openExternal(PluginCall call) {
         String url = call.getString("url", "");
-        if (url == null || !(url.startsWith("http://") || url.startsWith("https://"))) {
+        if (url == null || !(url.startsWith("http://") || url.startsWith("https://") || url.startsWith("tel:"))) {
             call.reject("Adresse de mise à jour invalide.");
             return;
         }

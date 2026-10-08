@@ -280,6 +280,7 @@ function renderClients() {
     <article class="card">
       <p><strong>${esc(item.clientName)}</strong> · ${esc(item.phone)}</p>
       <p>${esc(requestOfferLine(item))}</p>
+      ${item.payName ? `<p class="meta">Payé via ${esc(item.payName)}</p>` : ''}
       ${proof
         ? `<button type="button" class="proof-open" data-action="request-proof" data-id="${esc(item.id)}"><img class="payment-proof" src="${proof}" alt="Capture du paiement"></button>`
         : '<p class="meta">Aucune capture jointe.</p>'}
@@ -297,6 +298,7 @@ function renderClients() {
       <div class="actions">
         <button type="button" data-action="plan-quotas">Routeurs et revendeurs</button>
         <button type="button" data-action="plan-add">Ajouter une offre</button>
+        <button type="button" data-action="pay-means">Moyens de paiement</button>
       </div>
       <form data-form="plan-save" class="stack">
         ${planFields}
@@ -392,7 +394,7 @@ function defaultEssaiPlan() {
 }
 
 function reservedPlanId(id) {
-  return ['basique', 'standard', 'pro', 'essai', 'fondateur'].includes(id);
+  return ['basique', 'standard', 'pro', 'essai', 'fondateur', 'paiements'].includes(id);
 }
 
 function planIdFromName(name) {
@@ -487,6 +489,117 @@ function openPlanQuotaModal() {
     }
   });
   (document.querySelector('body.has-dock main') || document.body).appendChild(overlay);
+}
+
+function payMeanEditRow(item = { name: '', phone: '', kind: 'simple', guide: '' }) {
+  const kind = ['agent', 'marchand', 'simple'].includes(item.kind) ? item.kind : 'simple';
+  const kinds = typeof PAYMENT_KINDS !== 'undefined'
+    ? PAYMENT_KINDS
+    : [
+      { id: 'simple', label: 'Compte simple' },
+      { id: 'agent', label: 'Code agent' },
+      { id: 'marchand', label: 'SIM marchand' },
+    ];
+  return `
+    <div class="pay-mean-edit">
+      <input name="payName" placeholder="Ex. Orange Money" value="${esc(item.name || '')}" autocomplete="off">
+      <input name="payPhone" placeholder="Numéro" value="${esc(item.phone || '')}" inputmode="tel" autocomplete="off">
+      <select name="payKind">
+        ${kinds.map((entry) => `<option value="${esc(entry.id)}"${entry.id === kind ? ' selected' : ''}>${esc(entry.label)}</option>`).join('')}
+      </select>
+      <textarea name="payGuide" rows="2" placeholder="Ex. Composez *144*1*numéro*montant#">${esc(item.guide || '')}</textarea>
+    </div>
+  `;
+}
+
+async function openPayMeansModal() {
+  const current = typeof loadPublicContact === 'function'
+    ? await loadPublicContact()
+    : { payments: [], contactPhone: '' };
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  const rows = current.payments.length ? current.payments : [{ name: '', phone: '' }, { name: '', phone: '' }];
+  overlay.innerHTML = `
+    <section class="modal modal-form" role="dialog" aria-modal="true">
+      <h2>Moyens de paiement</h2>
+      <p class="meta">Le client choisit d’abord sa formule, puis un moyen. Le guide s’affiche avant la capture. Appel et WhatsApp peuvent être deux numéros. Si WhatsApp est vide, le numéro d’appel est utilisé.</p>
+      <form class="stack" data-pay-means>
+        <div data-pay-rows>
+          ${rows.map((item) => payMeanEditRow(item)).join('')}
+        </div>
+        <button type="button" class="btn-quiet" data-add-pay>Ajouter un moyen</button>
+        <label>Numéro d’appel</label>
+        <input name="contactPhone" value="${esc(current.contactPhone || '')}" inputmode="tel" placeholder="Indicatif + numéro, ex. 22670000000" autocomplete="off">
+        <label>Numéro WhatsApp</label>
+        <input name="contactWhatsapp" value="${esc(current.contactWhatsapp || '')}" inputmode="tel" placeholder="Laisser vide = même numéro que l’appel" autocomplete="off">
+        <div class="modal-actions">
+          <button type="button" class="btn-quiet" data-cancel>Annuler</button>
+          <button type="submit">Enregistrer</button>
+        </div>
+      </form>
+    </section>
+  `;
+  overlay.querySelector('[data-cancel]').addEventListener('click', () => overlay.remove());
+  overlay.querySelector('[data-add-pay]').addEventListener('click', () => {
+    const host = overlay.querySelector('[data-pay-rows]');
+    if (!host || host.querySelectorAll('.pay-mean-edit').length >= 8) return;
+    host.insertAdjacentHTML('beforeend', payMeanEditRow());
+  });
+  overlay.querySelector('form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const submit = form.querySelector('[type="submit"]');
+    submit.disabled = true;
+    try {
+      await savePublicContact(form);
+      if (typeof clearPublicContactCache === 'function') clearPublicContactCache();
+      overlay.remove();
+      showToast('Moyens de paiement enregistrés.', 'ok');
+    } catch (error) {
+      showToast(error.message, 'err', 7000);
+      submit.disabled = false;
+    }
+  });
+  (document.querySelector('body.has-dock main') || document.body).appendChild(overlay);
+}
+
+async function savePublicContact(form) {
+  const names = [...form.querySelectorAll('[name="payName"]')];
+  const phones = [...form.querySelectorAll('[name="payPhone"]')];
+  const kinds = [...form.querySelectorAll('[name="payKind"]')];
+  const guides = [...form.querySelectorAll('[name="payGuide"]')];
+  const payments = names.map((input, index) => ({
+    name: String(input.value || '').trim(),
+    phone: String(phones[index]?.value || '').trim(),
+    kind: ['agent', 'marchand', 'simple'].includes(kinds[index]?.value) ? kinds[index].value : 'simple',
+    guide: String(guides[index]?.value || '').trim(),
+  })).filter((item) => item.name && item.phone).slice(0, 8);
+  const contactPhone = String(form.elements.contactPhone.value || '').trim();
+  const contactWhatsapp = String(form.elements.contactWhatsapp.value || '').trim();
+  const record = {
+    payments: JSON.stringify(payments),
+    contactPhone,
+    contactWhatsapp,
+    active: '0',
+    name: 'Paiements',
+  };
+  const payload = licenseFieldsPayload(record);
+  const masks = ['payments', 'contactPhone', 'contactWhatsapp', 'active', 'name']
+    .map((key) => `updateMask.fieldPaths=${key}`)
+    .join('&');
+  let response = await operatorFirestore(`plans/paiements?${masks}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+  if (response.status === 404) {
+    response = await operatorFirestore('plans?documentId=paiements', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+  if (!response.ok) {
+    throw new Error('Enregistrement refusé. Publiez les règles plans, comme pour les tarifs.');
+  }
 }
 
 async function savePlanQuotas(form) {
@@ -670,6 +783,7 @@ async function loadLicenseRequests() {
       upgradeEndsAt: firestoreString(fields, 'upgradeEndsAt'),
       extraMonths: firestoreString(fields, 'extraMonths'),
       proof: firestoreString(fields, 'proof'),
+      payName: firestoreString(fields, 'payName'),
     };
   }).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
 }
@@ -813,6 +927,12 @@ if (app) {
       event.preventDefault();
       event.stopImmediatePropagation();
       openPlanQuotaModal();
+      return;
+    }
+    if (event.target.closest('[data-action="pay-means"]')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      openPayMeansModal().catch((error) => showToast(error.message, 'err'));
       return;
     }
     if (event.target.closest('[data-action="plan-add"]')) {

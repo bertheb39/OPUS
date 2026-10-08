@@ -594,6 +594,7 @@ function licenseStatusCardHtml() {
         ${until ? `<span>jusqu’au ${esc(until)}</span>` : '<span>Sans date de fin</span>'}
       </span>
       <button type="button" class="license-status-btn" data-action="manage-subscription">${frozen ? 'Renouveler' : 'Gérer'}</button>
+      ${typeof aboutInfoButtonHtml === 'function' ? aboutInfoButtonHtml() : ''}
     </section>
   `;
 }
@@ -1040,12 +1041,80 @@ async function loadPublicPlans() {
       });
     }
   } catch { /* catalogue local */ }
-  const list = [...merged.values()];
+  const list = [...merged.values()].filter((item) => item.id !== 'paiements');
   rememberPlanQuotas(list);
   rememberPlanNames(list);
   return list.filter((item) => (
-    item.active !== '0' && item.id && item.id !== 'essai' && item.id !== 'fondateur'
+    item.active !== '0' && item.id && item.id !== 'essai' && item.id !== 'fondateur' && item.id !== 'paiements'
   ));
+}
+
+function parsePaymentMethods(raw) {
+  let list = [];
+  try { list = JSON.parse(String(raw || '[]')); } catch { list = []; }
+  if (!Array.isArray(list)) return [];
+  return list.map((item) => ({
+    name: String(item?.name || '').trim(),
+    phone: String(item?.phone || '').trim(),
+    kind: ['agent', 'marchand', 'simple'].includes(item?.kind) ? item.kind : 'simple',
+    guide: String(item?.guide || '').trim(),
+  })).filter((item) => item.name && item.phone).slice(0, 8);
+}
+
+const PAYMENT_KINDS = [
+  { id: 'simple', label: 'Compte simple' },
+  { id: 'agent', label: 'Code agent' },
+  { id: 'marchand', label: 'SIM marchand' },
+];
+
+function paymentKindLabel(kind) {
+  return PAYMENT_KINDS.find((item) => item.id === kind)?.label || 'Compte simple';
+}
+
+function paymentGuideHtml(item) {
+  if (!item) return '';
+  const steps = String(item.guide || '').trim();
+  return `
+    <p><strong>${esc(item.name)}</strong> · ${esc(paymentKindLabel(item.kind))}</p>
+    <p class="pay-mean"><span>${esc(item.phone)}</span> <button type="button" class="btn-quiet" data-copy-pay="${esc(item.phone)}">Copier</button></p>
+    ${steps ? `<p class="pay-guide-steps">${esc(steps)}</p>` : '<p class="meta">Payez vers ce numéro.</p>'}
+    <p class="meta">Faites le paiement, puis revenez ici avec la capture. La demande part seulement après cette confirmation.</p>
+  `;
+}
+
+function contactDigits(phone) {
+  let digits = String(phone || '').replace(/\D/g, '');
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  return digits;
+}
+
+let publicContactCache = null;
+
+function clearPublicContactCache() {
+  publicContactCache = null;
+}
+
+async function loadPublicContact() {
+  if (publicContactCache) return publicContactCache;
+  const empty = { payments: [], contactPhone: '', contactWhatsapp: '' };
+  try {
+    const project = encodeURIComponent(FIREBASE_PROJECT_ID);
+    const key = encodeURIComponent(FIREBASE_API_KEY);
+    const response = await firestoreRequest(
+      `https://firestore.googleapis.com/v1/projects/${project}/databases/%28default%29/documents/plans/paiements?key=${key}`,
+    );
+    if (!response.ok) return empty;
+    const doc = await response.json();
+    const fields = doc.fields || {};
+    publicContactCache = {
+      payments: parsePaymentMethods(firestoreString(fields, 'payments')),
+      contactPhone: firestoreString(fields, 'contactPhone').trim(),
+      contactWhatsapp: firestoreString(fields, 'contactWhatsapp').trim(),
+    };
+    return publicContactCache;
+  } catch {
+    return empty;
+  }
 }
 
 const licenseRequestKey = 'opus.licenseRequest';
@@ -1075,6 +1144,7 @@ async function sendLicenseRequest(payload) {
           upgradeDue: { stringValue: String(payload.upgradeDue || '') },
           upgradeEndsAt: { stringValue: String(payload.upgradeEndsAt || '') },
           proof: { stringValue: String(payload.proof || '') },
+          payName: { stringValue: String(payload.payName || '') },
         },
       }),
     },
@@ -1109,6 +1179,7 @@ async function fetchLicenseRequest(id) {
     upgradeEndsAt: firestoreString(fields, 'upgradeEndsAt'),
     extraMonths: firestoreString(fields, 'extraMonths'),
     proof: firestoreString(fields, 'proof'),
+    payName: firestoreString(fields, 'payName'),
   };
 }
 
@@ -1269,6 +1340,7 @@ async function refreshSubscriptionModal(root) {
     }
   }
   const plans = await loadPublicPlans();
+  const contact = await loadPublicContact();
   const cache = subscriptionLicenseRecord();
   const prolong = canProlongSubscription(cache);
   root.innerHTML = `
@@ -1315,6 +1387,17 @@ async function refreshSubscriptionModal(root) {
           </div>
         </div>
         <p><strong data-request-choice></strong></p>
+        <div data-pay-step ${contact.payments.length ? '' : 'hidden'}>
+          <p class="meta">Moyen de paiement</p>
+          <div class="license-periods">
+            ${contact.payments.map((item, index) => `
+              <button type="button" class="license-period" data-pick-pay="${index}">${esc(item.name)}</button>
+            `).join('')}
+          </div>
+          <div class="pay-guide" data-pay-guide hidden></div>
+        </div>
+        <input type="hidden" name="payMethod" value="">
+        <div data-pay-confirm hidden>
         <label>Nom et prénom</label>
         <input name="clientName" required value="${esc(cache?.clientName || '')}" placeholder="Nom et prénom" autocomplete="name">
         <label>Téléphone</label>
@@ -1324,7 +1407,8 @@ async function refreshSubscriptionModal(root) {
         <p class="meta">Photo ou capture du reçu. Elle est vérifiée avant l’activation.</p>
         <img data-proof-preview hidden alt="Aperçu de la capture" class="payment-proof">
         <p class="meta" data-request-status hidden></p>
-        <button class="btn-sell" type="submit">Envoyer la demande</button>
+        <button class="btn-sell" type="submit">Confirmer et envoyer</button>
+        </div>
       </form>`}
       <form data-license-form class="license-code-row">
         <label>Code déjà reçu</label>
@@ -1360,6 +1444,19 @@ async function refreshSubscriptionModal(root) {
     }
   });
   bindLicenseCodeForm(root);
+  root.addEventListener('click', async (event) => {
+    const copy = event.target.closest('[data-copy-pay]');
+    if (!copy || !root.contains(copy)) return;
+    event.preventDefault();
+    const phone = copy.dataset.copyPay || '';
+    if (!phone) return;
+    try {
+      await navigator.clipboard.writeText(phone);
+      showToast('Numéro copié.', 'ok');
+    } catch {
+      showToast(phone, 'ok');
+    }
+  });
   root.querySelector('[data-close-subscription]')?.addEventListener('click', closeSubscriptionModal);
   root.addEventListener('click', (event) => {
     if (event.target === root) closeSubscriptionModal();
@@ -1393,6 +1490,14 @@ async function refreshSubscriptionModal(root) {
       item.classList.toggle('is-on', Number(item.dataset.pickPeriod) === Number(form.elements.months.value));
     });
   };
+  const revealPayment = () => {
+    if (!form) return;
+    const step = form.querySelector('[data-pay-step]');
+    const confirmBox = form.querySelector('[data-pay-confirm]');
+    const hasMeans = contact.payments.length > 0;
+    if (step) step.hidden = !hasMeans;
+    if (confirmBox) confirmBox.hidden = hasMeans && !form.elements.payMethod.value;
+  };
   root.querySelector('[data-prolong]')?.addEventListener('click', () => {
     const planId = String(cache?.plan || '').trim().toLowerCase();
     const plan = plans.find((item) => item.id === planId);
@@ -1407,6 +1512,7 @@ async function refreshSubscriptionModal(root) {
     form.elements.plan.value = plan.id;
     form.elements.months.value = '1';
     paintChoice();
+    revealPayment();
   });
   root.querySelectorAll('[data-pick-plan]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -1418,6 +1524,23 @@ async function refreshSubscriptionModal(root) {
       const base = licenseUpgradeQuote(cache, plan, plans, 0);
       form.elements.months.value = base?.partialDays ? '1' : (base ? '0' : '1');
       paintChoice();
+      revealPayment();
+    });
+  });
+  root.querySelectorAll('[data-pick-pay]').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (!form) return;
+      const item = contact.payments[Number(button.dataset.pickPay)];
+      if (!item) return;
+      form.elements.payMethod.value = `${item.name} · ${paymentKindLabel(item.kind)}`;
+      root.querySelectorAll('[data-pick-pay]').forEach((other) => other.classList.toggle('is-on', other === button));
+      const guide = form.querySelector('[data-pay-guide]');
+      if (guide) {
+        guide.innerHTML = paymentGuideHtml(item);
+        guide.hidden = false;
+      }
+      const confirmBox = form.querySelector('[data-pay-confirm]');
+      if (confirmBox) confirmBox.hidden = false;
     });
   });
   root.querySelectorAll('[data-pick-period]').forEach((button) => {
@@ -1451,6 +1574,9 @@ async function refreshSubscriptionModal(root) {
       status.textContent = 'Envoi…';
     }
     try {
+      if (contact.payments.length && !String(data.payMethod || '').trim()) {
+        throw new Error('Choisissez un moyen de paiement.');
+      }
       const paid = subscriptionLicenseRecord();
       const plan = plans.find((item) => item.id === String(data.plan || ''));
       const picked = [0, 1, 3, 12].includes(Number(data.months)) ? Number(data.months) : 0;
@@ -1464,6 +1590,7 @@ async function refreshSubscriptionModal(root) {
         extraMonths: quote ? quote.extra : '',
         currentCode: paid.code,
         proof,
+        payName: String(data.payMethod || ''),
         upgrade: quote ? '1' : '0',
         upgradeDue: quote ? String(quote.due) : '',
         upgradeEndsAt: quote ? quote.endsAt : '',

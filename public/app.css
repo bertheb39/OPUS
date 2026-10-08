@@ -145,6 +145,168 @@ header #to-clients {
   flex: 0 0 auto;
 }
 
+#about-sheet {
+  z-index: 10050;
+}
+
+.about-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: #f4f7fa;
+  color: var(--brand-dark);
+}
+
+.about-info svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+
+header .about-info {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-color: rgba(255, 255, 255, 0.45);
+  background: transparent;
+  color: white;
+}
+
+.about-card {
+  width: min(360px, 100%);
+  text-align: center;
+}
+
+.about-logo {
+  display: block;
+  width: 112px;
+  height: 112px;
+  margin: 4px auto 12px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #fff;
+  border: 1px solid #e4edf4;
+}
+
+.about-card .about-name {
+  margin: 0 0 8px;
+  color: var(--brand-dark);
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.about-card .about-line {
+  margin: 0 0 16px;
+  color: var(--muted);
+}
+
+.about-card .about-line strong {
+  color: var(--brand-dark);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.about-contacts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.about-contacts button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin: 0;
+  padding: 10px 8px;
+  border-radius: 12px;
+}
+
+.about-contacts svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+.about-wa {
+  background: #128c7e;
+}
+
+.about-call {
+  background: var(--brand-dark);
+}
+
+.pay-means {
+  margin: 8px 0 12px;
+}
+
+.pay-mean {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin: 0 0 6px;
+  color: var(--ink);
+}
+
+.pay-mean .btn-quiet {
+  margin: 0;
+  padding: 4px 8px;
+}
+
+.pay-mean-edit {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.pay-mean-edit input,
+.pay-mean-edit select,
+.pay-mean-edit textarea {
+  margin: 0;
+}
+
+.pay-mean-edit select,
+.pay-mean-edit textarea {
+  grid-column: 1 / -1;
+}
+
+.pay-guide {
+  margin: 8px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid #d5e2ec;
+  border-radius: 12px;
+  background: #f4f7fa;
+}
+
+.pay-guide-steps {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-weight: 700;
+  white-space: pre-line;
+}
+
+[data-action="pay-means"] {
+  grid-column: 1 / -1;
+}
+
 header #logout {
   display: inline-flex;
   align-items: center;
@@ -764,7 +926,7 @@ body.update-locked {
   overflow: hidden;
 }
 
-body.update-locked > *:not(#update-gate) {
+body.update-locked > *:not(#update-gate):not(#about-sheet) {
   pointer-events: none;
   user-select: none;
 }
@@ -791,7 +953,7 @@ body.update-locked > *:not(#update-gate) {
   padding-left: 18px;
 }
 
-body.quota-locked > *:not(#quota-gate) {
+body.quota-locked > *:not(#quota-gate):not(#about-sheet) {
   pointer-events: none;
   user-select: none;
 }
@@ -885,7 +1047,7 @@ body.license-locked {
   overflow: hidden;
 }
 
-body.license-locked > *:not(#license-gate) {
+body.license-locked > *:not(#license-gate):not(#about-sheet) {
   pointer-events: none;
   user-select: none;
 }

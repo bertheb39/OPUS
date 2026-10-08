@@ -291,7 +291,7 @@ async function api(url, options = {}) {
   return localApi(url, options);
 }
 
-const APP_VERSION = '2.8.7';
+const APP_VERSION = '2.8.8';
 const UPDATE_REPO = 'bertheb39/OPUS';
 const activityKey = 'opus.activity';
 const currencyKey = 'opus.currency';
@@ -799,3 +799,96 @@ function actifsTableHtml(sessions, { admin = false } = {}) {
     </div>
   `;
 }
+
+function aboutInfoButtonHtml() {
+  return `<button type="button" class="about-info" data-about-open aria-label="À propos de nous"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11.2v5"/><circle cx="12" cy="8" r="0.9" fill="currentColor" stroke="none"/></svg></button>`;
+}
+
+function installAboutEntry() {
+  if (document.body.classList.contains('page-admin') || document.querySelector('header [data-about-open]')) return;
+  const header = document.querySelector('header');
+  if (!header) return;
+  let actions = header.querySelector('.header-actions');
+  if (!actions) {
+    actions = document.createElement('div');
+    actions.className = 'header-actions';
+    header.appendChild(actions);
+  }
+  actions.insertAdjacentHTML('afterbegin', aboutInfoButtonHtml());
+}
+
+function openContactLink(url) {
+  const plugin = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.RouterOs;
+  if (url.startsWith('tel:') && plugin && plugin.openExternal) {
+    plugin.openExternal({ url }).catch(() => { window.location.href = url; });
+    return;
+  }
+  if (typeof openExternal === 'function' && url.startsWith('https://')) {
+    openExternal(url).catch(() => window.open(url, '_blank'));
+    return;
+  }
+  if (url.startsWith('tel:')) window.location.href = url;
+  else window.open(url, '_blank');
+}
+
+async function openAboutSheet() {
+  document.getElementById('about-sheet')?.remove();
+  const root = document.createElement('div');
+  root.id = 'about-sheet';
+  root.className = 'modal-overlay';
+  root.innerHTML = `
+    <section class="modal about-card" role="dialog" aria-modal="true" aria-labelledby="about-title">
+      <img class="about-logo" src="Logo.png" alt="" width="112" height="112">
+      <p class="about-name" id="about-title">HORIZON&nbsp;TEAM</p>
+      <p class="about-line">Cette application est conçue par <strong>HORIZON&nbsp;TEAM</strong></p>
+      <div class="about-contacts">
+        <button type="button" class="about-wa" data-about-wa disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.2A8.7 8.7 0 0 0 4.6 16.3L3.4 20.6l4.4-1.2A8.8 8.8 0 1 0 12 3.2zm4.9 12.3c-.2.6-1.2 1.1-1.7 1.2-.4.1-1 .1-1.6-.1-.4-.1-.8-.3-1.4-.5-2.5-1.1-4.1-3.6-4.2-3.7-.1-.2-1-1.3-1-2.5s.6-1.8.9-2c.2-.2.5-.3.9-.3h.3c.2 0 .4 0 .6.4.2.5.7 1.7.8 1.8.1.1.1.3 0 .4-.1.2-.1.3-.2.4l-.4.4c-.1.1-.2.2-.1.5.1.2.6 1 1.3 1.6.9.8 1.6 1 1.9 1.2.2.1.4.1.5-.1.2-.2.6-.7.7-.9.2-.2.3-.2.5-.1.2.1 1.4.6 1.6.8.2.1.4.2.5.3.1.2.1.6-.1 1.1z"/></svg>
+          WhatsApp
+        </button>
+        <button type="button" class="about-call" data-about-call disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 11.2a12 12 0 0 0 5.8 5.8l1.8-1.8c.2-.2.6-.3.9-.2 1 .3 2 .5 3.1.5.5 0 .9.4.9.9v2.7c0 .5-.4.9-.9.9C10.2 20 4 13.8 4 6.4c0-.5.4-.9.9-.9H7.6c.5 0 .9.4.9.9 0 1.1.2 2.1.5 3.1.1.3 0 .7-.2.9L7 11.2z"/></svg>
+          Appel
+        </button>
+      </div>
+      <button type="button" class="btn-block btn-quiet" data-close-about>Fermer</button>
+    </section>
+  `;
+  document.body.appendChild(root);
+  const close = () => root.remove();
+  root.querySelector('[data-close-about]').addEventListener('click', close);
+  root.addEventListener('click', (event) => {
+    if (event.target === root) close();
+  });
+  let phone = '';
+  let whatsapp = '';
+  try {
+    if (typeof loadPublicContact === 'function') {
+      const contact = await loadPublicContact();
+      phone = String(contact?.contactPhone || '').trim();
+      whatsapp = String(contact?.contactWhatsapp || '').trim() || phone;
+    }
+  } catch { phone = ''; }
+  if (!root.isConnected) return;
+  const wa = root.querySelector('[data-about-wa]');
+  const call = root.querySelector('[data-about-call]');
+  if (whatsapp) {
+    const digits = String(whatsapp).replace(/\D/g, '').replace(/^00/, '');
+    wa.disabled = false;
+    wa.addEventListener('click', () => openContactLink(`https://wa.me/${digits}`));
+  }
+  if (phone) {
+    const tel = `tel:${phone.replace(/\s/g, '')}`;
+    call.disabled = false;
+    call.addEventListener('click', () => openContactLink(tel));
+  }
+}
+
+document.addEventListener('click', (event) => {
+  if (!event.target.closest('[data-about-open]')) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openAboutSheet();
+});
+
+document.addEventListener('DOMContentLoaded', installAboutEntry);
