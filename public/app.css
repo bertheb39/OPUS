@@ -42,6 +42,7 @@ body.has-dock {
 }
 
 body.has-dock main {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   width: 100%;
@@ -638,7 +639,7 @@ body.has-dock > #app-dock {
 
 .dock {
   position: relative;
-  z-index: 40;
+  z-index: 50;
   left: auto;
   right: auto;
   bottom: auto;
@@ -839,6 +840,22 @@ body.license-locked > *:not(#license-gate) {
   user-select: none;
 }
 
+body.has-dock > header {
+  position: relative;
+  z-index: 50;
+}
+
+body.has-dock main > .modal-overlay {
+  position: absolute;
+  z-index: 5;
+  overflow: hidden;
+  padding: 12px;
+}
+
+body.has-dock main > .modal-overlay > .modal {
+  max-height: 100%;
+}
+
 .modal-overlay {
   position: fixed;
   z-index: 90;
@@ -920,6 +937,10 @@ body.license-locked > *:not(#license-gate) {
 
 .modal {
   width: min(380px, 100%);
+  min-height: 0;
+  max-height: calc(100% - 8px);
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
   padding: 22px 18px 16px;
   border-radius: 22px;
   background: white;
@@ -942,6 +963,12 @@ body.license-locked > *:not(#license-gate) {
 }
 
 .modal-actions button { width: 100%; margin-top: 8px; }
+
+.quota-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
 
 .profile-box {
   margin-top: 12px;

@@ -382,9 +382,66 @@ function isFounderLicense() {
   return currentLicensePlan() === 'fondateur';
 }
 
+const planQuotaById = {};
+
+function readPlanQuota(plan) {
+  if (!plan?.id || plan.id === 'fondateur') return null;
+  const base = LICENSE_RIGHTS[plan.id] || null;
+  const routers = Number(plan.maxRouters);
+  const resellers = Number(plan.maxResellers);
+  const per = Number(plan.maxResellersPerRouter);
+  const days = Number(plan.days);
+  const valid = Number.isInteger(routers) && routers >= 1 && Number.isInteger(resellers) && resellers >= 1;
+  if (!valid) {
+    if (!base) return null;
+    return {
+      maxRouters: base.maxRouters,
+      maxResellers: base.maxResellers,
+      maxResellersPerRouter: base.maxResellersPerRouter,
+      days: base.days || 0,
+      custom: false,
+    };
+  }
+  const perRouter = Number.isInteger(per) && per >= 1
+    ? Math.min(per, resellers)
+    : Math.min(base?.maxResellersPerRouter || resellers, resellers);
+  return {
+    maxRouters: routers,
+    maxResellers: resellers,
+    maxResellersPerRouter: perRouter,
+    days: Number.isInteger(days) && days >= 1 ? days : (base?.days || 0),
+    custom: true,
+  };
+}
+
+function rememberPlanQuotas(plans) {
+  Object.keys(planQuotaById).forEach((key) => { delete planQuotaById[key]; });
+  (plans || []).forEach((plan) => {
+    const quota = readPlanQuota(plan);
+    if (quota?.custom) planQuotaById[plan.id] = quota;
+  });
+}
+
 function licenseRights(plan) {
   const key = plan || currentLicensePlan() || 'basique';
-  return LICENSE_RIGHTS[key] || LICENSE_RIGHTS.basique;
+  const base = LICENSE_RIGHTS[key] || {
+    maxRouters: 1,
+    maxResellers: 1,
+    maxResellersPerRouter: 1,
+    drive: true,
+    blurb: '',
+    days: 0,
+  };
+  if (key === 'fondateur') return base;
+  const quota = planQuotaById[key];
+  if (!quota) return base;
+  return {
+    ...base,
+    maxRouters: quota.maxRouters,
+    maxResellers: quota.maxResellers,
+    maxResellersPerRouter: quota.maxResellersPerRouter,
+    ...(quota.days >= 1 ? { days: quota.days } : {}),
+  };
 }
 
 function licenseAllowsDrive(plan) {
@@ -494,7 +551,7 @@ function licenseBlockMessage(record) {
   if (record.status === 'suspended') return 'Abonnement interrompu. Choisissez une offre ou contactez HORIZON TEAM.';
   if (record.status === 'revoked') return 'Cette licence a été retirée.';
   if (record.endsAt && record.endsAt < licenseToday()) {
-    if (record.plan === 'essai') return 'Votre essai de 5 jours est terminé. Choisissez une offre pour continuer.';
+    if (record.plan === 'essai') return 'Votre essai est terminé. Choisissez une offre pour continuer.';
     return 'Abonnement terminé. Choisissez une offre pour le renouveler.';
   }
   return 'Licence inactive.';
@@ -642,6 +699,9 @@ function parsePlanDoc(doc) {
     days: firestoreString(fields, 'days'),
     blurb: firestoreString(fields, 'blurb'),
     active: firestoreString(fields, 'active') || '1',
+    maxRouters: firestoreString(fields, 'maxRouters'),
+    maxResellers: firestoreString(fields, 'maxResellers'),
+    maxResellersPerRouter: firestoreString(fields, 'maxResellersPerRouter'),
   };
 }
 
@@ -676,8 +736,11 @@ async function loadPublicPlans() {
       });
     }
   } catch { /* catalogue local */ }
-  return [...merged.values()].filter((item) => (
-    item.active !== '0' && ['basique', 'standard', 'pro'].includes(item.id)
+  const list = [...merged.values()];
+  rememberPlanQuotas(list);
+  rememberPlanNames(list);
+  return list.filter((item) => (
+    item.active !== '0' && item.id && item.id !== 'essai' && item.id !== 'fondateur'
   ));
 }
 
@@ -1120,6 +1183,11 @@ function licenseAddDays(iso, days) {
   return `${base.getFullYear()}-${month}-${day}`;
 }
 
+function essaiDayCount() {
+  const days = Number(licenseRights('essai').days);
+  return Number.isInteger(days) && days >= 1 ? days : 5;
+}
+
 function startLocalEssai() {
   const start = licenseToday();
   writeLicenseCache({
@@ -1127,7 +1195,7 @@ function startLocalEssai() {
     plan: 'essai',
     status: 'active',
     startsAt: start,
-    endsAt: licenseAddDays(start, 5),
+    endsAt: licenseAddDays(start, essaiDayCount()),
     clientName: '',
     deviceId: licenseDeviceId(),
     workspaceId: licenseWorkspaceId(),
@@ -1142,6 +1210,7 @@ async function refreshLicenseOrGrace() {
     cache = readLicenseCache();
   }
   if (!cache?.code) {
+    try { await loadPublicPlans(); } catch { /* durée d’essai locale */ }
     startLocalEssai();
     clearLicenseGate();
     return false;
@@ -1189,14 +1258,22 @@ async function refreshLicenseOrGrace() {
   }
 }
 
+const planNameById = {
+  fondateur: 'Fondateur',
+  essai: 'Essai',
+  basique: 'Basique',
+  standard: 'Standard',
+  pro: 'Pro',
+};
+
+function rememberPlanNames(plans) {
+  (plans || []).forEach((plan) => {
+    if (plan?.id && plan.name) planNameById[plan.id] = plan.name;
+  });
+}
+
 function licensePlanLabel(plan) {
-  return ({
-    fondateur: 'Fondateur',
-    essai: 'Essai',
-    basique: 'Basique',
-    standard: 'Standard',
-    pro: 'Pro',
-  })[plan] || plan || 'Licence';
+  return planNameById[plan] || plan || 'Licence';
 }
 
 function paintLicenseBadge() {

@@ -201,7 +201,8 @@ function renderClients() {
   const planFields = plans.map((plan) => `
     <article class="card">
       <h3>${esc(plan.name || plan.id)}</h3>
-      <p class="meta">${esc((typeof LICENSE_RIGHTS !== 'undefined' && LICENSE_RIGHTS[plan.id]?.blurb) || '')}</p>
+      <p class="meta">${esc(plan.blurb || (typeof LICENSE_RIGHTS !== 'undefined' && LICENSE_RIGHTS[plan.id]?.blurb) || '')}</p>
+      <p class="meta">${esc(offerQuotaLabel(plan))}</p>
       <label>Nom affiché</label>
       <input name="name_${esc(plan.id)}" value="${esc(plan.name || '')}">
       <label>Prix / mois</label>
@@ -225,6 +226,10 @@ function renderClients() {
     <section class="card">
       <h2>Tarifs des abonnements</h2>
       <p class="meta">Les clients voient ces offres avant de demander un code.</p>
+      <div class="actions">
+        <button type="button" data-action="plan-quotas">Routeurs et revendeurs</button>
+        <button type="button" data-action="plan-add">Ajouter une offre</button>
+      </div>
       <form data-form="plan-save" class="stack">
         ${planFields}
         <button type="submit">Enregistrer les tarifs</button>
@@ -244,9 +249,9 @@ function renderClients() {
         <input name="phone" placeholder="Téléphone" inputmode="tel">
         <label>Offre</label>
         <select name="plan">
-          <option value="basique">Basique</option>
-          <option value="standard">Standard</option>
-          <option value="pro">Pro</option>
+          ${(state.licensePlans || defaultSubscriptionPlans()).filter((plan) => plan.active !== '0' && plan.id !== 'essai').map((plan) => (
+            `<option value="${esc(plan.id)}">${esc(plan.name || plan.id)}</option>`
+          )).join('')}
         </select>
         <label>Durée</label>
         <select name="months">
@@ -269,18 +274,287 @@ function renderClients() {
 
 async function loadLicensePlans() {
   const response = await operatorFirestore('plans');
-  if (response.status === 403) return defaultSubscriptionPlans();
-  if (!response.ok) return defaultSubscriptionPlans();
+  if (!response.ok) {
+    state.essaiPlan = state.essaiPlan || defaultEssaiPlan();
+    return defaultSubscriptionPlans();
+  }
   const data = await response.json();
   const remote = new Map((data.documents || []).map((doc) => {
     const plan = parsePlanDoc(doc);
     return [plan.id, plan];
   }));
-  return defaultSubscriptionPlans().map((item) => ({ ...item, ...(remote.get(item.id) || {}) }));
+  const sellable = defaultSubscriptionPlans().map((item) => ({ ...item, ...(remote.get(item.id) || {}) }));
+  remote.forEach((plan, id) => {
+    if (!id || reservedPlanId(id)) return;
+    sellable.push({
+      id,
+      name: plan.name || id,
+      price: plan.price || '',
+      price3: plan.price3 || '',
+      price12: plan.price12 || '',
+      blurb: plan.blurb || '',
+      active: plan.active || '1',
+      maxRouters: plan.maxRouters || '',
+      maxResellers: plan.maxResellers || '',
+      maxResellersPerRouter: plan.maxResellersPerRouter || '',
+      days: plan.days || '',
+    });
+  });
+  state.essaiPlan = { ...defaultEssaiPlan(), ...(remote.get('essai') || {}) };
+  const known = [...sellable, state.essaiPlan];
+  if (typeof rememberPlanQuotas === 'function') rememberPlanQuotas(known);
+  if (typeof rememberPlanNames === 'function') rememberPlanNames(known);
+  return sellable;
+}
+
+function defaultEssaiPlan() {
+  return {
+    id: 'essai',
+    name: 'Essai',
+    price: '',
+    price3: '',
+    price12: '',
+    days: '5',
+    blurb: typeof LICENSE_RIGHTS !== 'undefined' ? LICENSE_RIGHTS.essai.blurb : '',
+    active: '1',
+    maxRouters: '',
+    maxResellers: '',
+    maxResellersPerRouter: '',
+  };
+}
+
+function reservedPlanId(id) {
+  return ['basique', 'standard', 'pro', 'essai', 'fondateur'].includes(id);
+}
+
+function planIdFromName(name) {
+  return String(name || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 24);
+}
+
+function offerQuotaLabel(plan) {
+  const quota = typeof readPlanQuota === 'function' ? readPlanQuota(plan) : null;
+  if (!quota) return '';
+  const routers = `${quota.maxRouters} routeur${quota.maxRouters > 1 ? 's' : ''}`;
+  const resellers = `${quota.maxResellers} revendeur${quota.maxResellers > 1 ? 's' : ''}`;
+  if (quota.maxResellersPerRouter < quota.maxResellers) {
+    return `${routers} · ${resellers} au total · ${quota.maxResellersPerRouter} par routeur`;
+  }
+  return `${routers} · ${resellers}`;
+}
+
+function offerQuotaBlurb(id, routers, resellers, days = 0) {
+  const routerLabel = `${routers} routeur${routers > 1 ? 's' : ''}`;
+  const resellerLabel = `${resellers} revendeur${resellers > 1 ? 's' : ''}`;
+  if (id === 'basique') return `${routerLabel} · ${resellerLabel} · sauvegarde fichier · pas de Drive`;
+  if (id === 'standard') return `${routerLabel} · ${resellerLabel} · Drive · formation`;
+  if (id === 'pro') return `Jusqu’à ${routers} routeur${routers > 1 ? 's' : ''} · ${resellerLabel} · Drive`;
+  if (id === 'essai') return `${days} jours · ${routerLabel} · ${resellerLabel}`;
+  return `${routerLabel} · ${resellerLabel} · Drive`;
+}
+
+function openPlanQuotaModal() {
+  const sellable = (state.licensePlans || defaultSubscriptionPlans()).filter((plan) => plan.id !== 'essai');
+  const plans = [state.essaiPlan || defaultEssaiPlan(), ...sellable];
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  const fields = plans.map((plan) => {
+    const quota = typeof readPlanQuota === 'function' ? readPlanQuota(plan) : null;
+    const routers = quota ? quota.maxRouters : 1;
+    const resellers = quota ? quota.maxResellers : 1;
+    const storedDays = Number(plan.days || quota?.days);
+    const days = Number.isInteger(storedDays) && storedDays >= 1 ? storedDays : 5;
+    return `
+      <h3>${esc(plan.name || plan.id)}</h3>
+      ${plan.id === 'essai' ? `
+        <label>Jours</label>
+        <input name="days_essai" type="number" min="1" max="365" step="1" value="${days}" required>
+        <p class="meta">L’essai n’est pas vendu. Il démarre seul sur un téléphone sans licence, pendant ce nombre de jours.</p>
+      ` : ''}
+      <div class="quota-pair">
+        <div>
+          <label>Routeurs</label>
+          <input name="routers_${esc(plan.id)}" type="number" min="1" max="99" step="1" value="${routers}" required>
+        </div>
+        <div>
+          <label>Revendeurs</label>
+          <input name="resellers_${esc(plan.id)}" type="number" min="1" max="999" step="1" value="${resellers}" required>
+        </div>
+      </div>
+    `;
+  }).join('');
+  overlay.innerHTML = `
+    <section class="modal modal-form" role="dialog" aria-modal="true">
+      <h2>Plafonds des offres</h2>
+      <p class="meta">Le nombre de revendeurs est le total du client. Si vous changez ce nombre, il peut tous les créer sur un seul routeur. L’essai se règle à part. Vous pouvez modifier ces plafonds quand vous voulez.</p>
+      <form class="stack" data-plan-quotas>
+        ${fields}
+        <div class="modal-actions">
+          <button type="button" class="btn-quiet" data-cancel>Annuler</button>
+          <button type="submit">Enregistrer</button>
+        </div>
+      </form>
+    </section>
+  `;
+  overlay.querySelector('[data-cancel]').addEventListener('click', () => overlay.remove());
+  overlay.querySelector('form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const submit = form.querySelector('[type="submit"]');
+    submit.disabled = true;
+    try {
+      await savePlanQuotas(form);
+      overlay.remove();
+      await refreshLicenseClients();
+      showToast('Plafonds enregistrés.', 'ok');
+      render();
+    } catch (error) {
+      showToast(error.message, 'err', 5000);
+      submit.disabled = false;
+    }
+  });
+  (document.querySelector('body.has-dock main') || document.body).appendChild(overlay);
+}
+
+async function savePlanQuotas(form) {
+  const rows = [...form.querySelectorAll('input[name^="routers_"]')].map((input) => input.name.slice('routers_'.length));
+  await Promise.all(rows.map(async (id) => {
+    const plan = [...(state.licensePlans || []), state.essaiPlan].find((item) => item?.id === id) || { id, name: id };
+    const routers = Number(form.elements[`routers_${id}`].value);
+    const resellers = Number(form.elements[`resellers_${id}`].value);
+    if (!Number.isInteger(routers) || routers < 1 || routers > 99) {
+      throw new Error(`Indiquez entre 1 et 99 routeurs pour ${plan.name || id}.`);
+    }
+    if (!Number.isInteger(resellers) || resellers < 1 || resellers > 999) {
+      throw new Error(`Indiquez entre 1 et 999 revendeurs pour ${plan.name || id}.`);
+    }
+    let days = 0;
+    if (id === 'essai') {
+      days = Number(form.elements.days_essai.value);
+      if (!Number.isInteger(days) || days < 1 || days > 365) {
+        throw new Error('Indiquez entre 1 et 365 jours pour l’essai.');
+      }
+    }
+    const previous = typeof readPlanQuota === 'function' ? readPlanQuota(plan) : null;
+    const perRouter = previous && resellers === previous.maxResellers
+      ? previous.maxResellersPerRouter
+      : resellers;
+    const builtin = typeof LICENSE_RIGHTS !== 'undefined' ? (LICENSE_RIGHTS[id]?.blurb || '') : '';
+    const currentBlurb = String(plan.blurb || '');
+    const generated = offerQuotaBlurb(id, routers, resellers, days);
+    const record = {
+      maxRouters: String(routers),
+      maxResellers: String(resellers),
+      maxResellersPerRouter: String(perRouter),
+      blurb: (id === 'essai' || !currentBlurb || currentBlurb === builtin) ? generated : currentBlurb,
+    };
+    if (id === 'essai') record.days = String(days);
+    const masks = Object.keys(record).map((key) => `updateMask.fieldPaths=${encodeURIComponent(key)}`).join('&');
+    let response = await operatorFirestore(`plans/${encodeURIComponent(id)}?${masks}`, {
+      method: 'PATCH',
+      body: JSON.stringify(licenseFieldsPayload(record)),
+    });
+    if (response.status === 404) {
+      response = await operatorFirestore(`plans?documentId=${encodeURIComponent(id)}`, {
+        method: 'POST',
+        body: JSON.stringify(licenseFieldsPayload({
+          name: plan.name || id,
+          price: plan.price || '',
+          price3: plan.price3 || '',
+          price12: plan.price12 || '',
+          active: plan.active === '0' ? '0' : '1',
+          ...record,
+        })),
+      });
+    }
+    if (!response.ok) throw new Error('Enregistrement des plafonds refusé. Publiez les règles plans.');
+  }));
+}
+
+function openPlanAddModal() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <section class="modal modal-form" role="dialog" aria-modal="true">
+      <h2>Nouvelle offre</h2>
+      <p class="meta">Elle apparaît chez les clients et dans la liste quand vous créez une licence. Le prix se règle ensuite dans Tarifs.</p>
+      <form class="stack">
+        <label>Nom</label>
+        <input name="name" required maxlength="40" placeholder="Exemple : Entreprise">
+        <label>Routeurs</label>
+        <input name="routers" type="number" min="1" max="99" step="1" value="1" required>
+        <label>Revendeurs</label>
+        <input name="resellers" type="number" min="1" max="999" step="1" value="5" required>
+        <div class="modal-actions">
+          <button type="button" class="btn-quiet" data-cancel>Annuler</button>
+          <button type="submit">Créer</button>
+        </div>
+      </form>
+    </section>
+  `;
+  overlay.querySelector('[data-cancel]').addEventListener('click', () => overlay.remove());
+  overlay.querySelector('form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const submit = form.querySelector('[type="submit"]');
+    submit.disabled = true;
+    try {
+      await createCustomPlan(form);
+      overlay.remove();
+      await refreshLicenseClients();
+      showToast('Offre créée.', 'ok');
+      render();
+    } catch (error) {
+      showToast(error.message, 'err', 5000);
+      submit.disabled = false;
+    }
+  });
+  (document.querySelector('body.has-dock main') || document.body).appendChild(overlay);
+}
+
+async function createCustomPlan(form) {
+  const name = String(form.elements.name.value || '').trim();
+  const id = planIdFromName(name);
+  const routers = Number(form.elements.routers.value);
+  const resellers = Number(form.elements.resellers.value);
+  if (name.length < 2) throw new Error('Indiquez le nom de l’offre.');
+  if (!/^[a-z0-9-]{2,24}$/.test(id) || reservedPlanId(id)) {
+    throw new Error('Ce nom ne peut pas servir d’offre. Choisissez-en un autre.');
+  }
+  const known = [...(state.licensePlans || []), state.essaiPlan].some((plan) => plan?.id === id);
+  if (known) throw new Error('Une offre porte déjà ce nom.');
+  if (!Number.isInteger(routers) || routers < 1 || routers > 99) {
+    throw new Error('Indiquez entre 1 et 99 routeurs.');
+  }
+  if (!Number.isInteger(resellers) || resellers < 1 || resellers > 999) {
+    throw new Error('Indiquez entre 1 et 999 revendeurs.');
+  }
+  const record = {
+    name,
+    price: '',
+    price3: '',
+    price12: '',
+    active: '1',
+    maxRouters: String(routers),
+    maxResellers: String(resellers),
+    maxResellersPerRouter: String(resellers),
+    blurb: offerQuotaBlurb(id, routers, resellers),
+  };
+  const response = await operatorFirestore(`plans?documentId=${encodeURIComponent(id)}`, {
+    method: 'POST',
+    body: JSON.stringify(licenseFieldsPayload(record)),
+  });
+  if (response.status === 409) throw new Error('Une offre porte déjà ce nom.');
+  if (!response.ok) throw new Error('Création de l’offre refusée. Publiez les règles plans.');
 }
 
 async function saveLicensePlans(form) {
-  const rows = ['basique', 'standard', 'pro'];
+  const rows = [...form.querySelectorAll('input[name^="name_"]')].map((input) => input.name.slice('name_'.length));
   await Promise.all(rows.map(async (id) => {
     const record = {
       name: String(form.elements[`name_${id}`].value || id),
@@ -385,6 +659,7 @@ async function refreshLicenseClients() {
   if (!isFounderOperator() || !readOperatorAuth()) {
     state.licenseClients = [];
     state.licensePlans = defaultSubscriptionPlans();
+    state.essaiPlan = defaultEssaiPlan();
     state.licenseRequests = [];
     return;
   }
@@ -441,6 +716,18 @@ if (app) {
 
   app.addEventListener('click', async (event) => {
     const accept = event.target.closest('[data-action="request-accept"]');
+    if (event.target.closest('[data-action="plan-quotas"]')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      openPlanQuotaModal();
+      return;
+    }
+    if (event.target.closest('[data-action="plan-add"]')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      openPlanAddModal();
+      return;
+    }
     if (accept) {
       event.preventDefault();
       event.stopImmediatePropagation();
