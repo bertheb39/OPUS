@@ -21,6 +21,7 @@ const state = {
   lots: [],
   pending: [],
   busy: false,
+  routerSync: false,
 };
 
 function renderLogin() {
@@ -202,7 +203,7 @@ function renderList() {
           ${pendingCards}
         </section>
       ` : ''}
-      ${cards || '<section class="card"><p class="meta">Aucun forfait.</p></section>'}
+      ${cards || `<section class="card"><p class="meta">${state.routerSync ? 'Lecture des tickets sur le routeur…' : 'Aucun forfait.'}</p></section>`}
     </div>
   `;
 }
@@ -376,28 +377,90 @@ function render(options = {}) {
   paint();
 }
 
-async function loadForfaits() {
-  const data = await api('/api/vendeur/forfaits');
+let forfaitStamp = 0;
+
+async function loadForfaits(options = {}) {
+  const stamp = Number(options.stamp) || 0;
+  const localOnly = options.sync === false;
+  const params = new URLSearchParams();
+  if (localOnly) params.set('sync', '0');
+  const data = await api(`/api/vendeur/forfaits${params.toString() ? `?${params}` : ''}`);
+  if (stamp && stamp !== forfaitStamp) return;
+  if (localOnly && loadForfaits.liveStamp === stamp) return;
+  if (!localOnly && stamp) loadForfaits.liveStamp = stamp;
   state.lots = data.lots || [];
   state.forfaits = data.forfaits;
   state.pending = data.pending || [];
 }
 
 function refreshForfaitsSoon() {
-  loadForfaits().catch(() => {});
+  loadForfaits({ sync: false }).then(() => {
+    if (state.authed && state.screen === 'list' && !state.ticket && !state.busy) render();
+  }).catch(() => {});
 }
 
-async function loadSales() {
+function refreshForfaitsFromRouter() {
+  const stamp = ++forfaitStamp;
+  state.routerSync = true;
+  loadForfaits({ stamp }).then(() => {
+    if (stamp !== forfaitStamp) return;
+    state.routerSync = false;
+    if (state.authed && state.screen === 'list' && !state.ticket && !state.busy) render();
+  }).catch(() => {
+    if (stamp !== forfaitStamp) return;
+    state.routerSync = false;
+    if (state.authed && state.screen === 'list' && !state.ticket && !state.busy) render();
+  });
+}
+
+function showForfaits() {
+  const stamp = ++forfaitStamp;
+  state.routerSync = true;
+  render({ resetScroll: true });
+  loadForfaits({ sync: false, stamp }).then(() => {
+    if (stamp === forfaitStamp && state.screen === 'list' && !state.ticket && !state.busy) render();
+  }).catch(() => {});
+  loadForfaits({ stamp }).then(() => {
+    if (stamp !== forfaitStamp) return;
+    state.routerSync = false;
+    if (state.screen === 'list' && !state.ticket && !state.busy) render();
+  }).catch(() => {
+    if (stamp !== forfaitStamp) return;
+    state.routerSync = false;
+    if (state.screen === 'list' && !state.ticket && !state.busy) render();
+  });
+}
+
+let salesViewStamp = 0;
+
+async function loadSales(options = {}) {
+  const stamp = Number(options.stamp) || 0;
+  const localOnly = options.sync === false;
   const params = new URLSearchParams();
   if (state.salesFrom) params.set('from', state.salesFrom);
   if (state.salesTo) params.set('to', state.salesTo);
+  if (localOnly) params.set('sync', '0');
   const data = await api(`/api/vendeur/ventes?${params.toString()}`);
+  if (stamp && stamp !== salesViewStamp) return;
+  if (localOnly && loadSales.liveStamp === stamp) return;
+  if (!localOnly && stamp) loadSales.liveStamp = stamp;
   state.report = data;
   state.salesFrom = data.period.from;
   state.salesTo = data.period.to;
   state.usage = {};
   state.usageWarning = '';
-  loadUsage();
+  if (!localOnly) loadUsage();
+}
+
+function refreshSalesView(options = {}) {
+  const stamp = ++salesViewStamp;
+  render(options.resetScroll ? { resetScroll: true } : {});
+  loadSales({ sync: false, stamp }).then(() => {
+    if (state.screen === 'history' && !state.busy) render();
+  }).catch((error) => showToast(error.message, 'err'));
+  loadSales({ stamp }).then(() => {
+    if (state.screen === 'history' && !state.busy) render();
+  }).catch(() => {});
 }
 
 let usageToken = 0;
@@ -467,11 +530,7 @@ app.addEventListener('submit', async (event) => {
     state.salesFrom = data.from;
     state.salesTo = data.to;
     state.periodKind = '';
-    await runBusyRender(render, () => loadSales(), {
-      busyLabel: 'Chargement du rapport…',
-      before: () => { state.busy = true; },
-      after: () => { state.busy = false; },
-    });
+    refreshSalesView();
     return;
   }
   if (form.dataset.form === 'verifier') {
@@ -509,11 +568,12 @@ app.addEventListener('submit', async (event) => {
   try {
     await api('/api/vendeur/login', { method: 'POST', body: data });
     state.me = await api('/api/vendeur/me');
-    await loadForfaits();
+    await loadForfaits({ sync: false });
     state.authed = true;
     state.screen = 'list';
     markActivity();
     idleLogout.done = false;
+    refreshForfaitsFromRouter();
   } catch (error) {
     showToast(error.message, 'err');
   } finally {
@@ -531,13 +591,7 @@ async function onVendeurClick(event) {
     state.ticket = null;
     state.verifyResult = null;
     state.screen = 'list';
-    await runBusyRender(render, () => loadForfaits().catch(() => {}), {
-      resetScroll: true,
-      quiet: Boolean(state.forfaits && state.forfaits.length),
-      busyLabel: 'Chargement…',
-      before: () => { state.busy = true; },
-      after: () => { state.busy = false; },
-    });
+    showForfaits();
     return;
   }
   if (action === 'screen') {
@@ -547,26 +601,24 @@ async function onVendeurClick(event) {
       state.verifyResult = null;
     }
     if (state.screen !== 'actifs') stopActifsPoll();
-    const hasList = state.forfaits && state.forfaits.length;
-    const hasReport = Boolean(state.report);
-    const quiet = (state.screen === 'list' && hasList)
-      || (state.screen === 'history' && hasReport)
-      || (state.screen === 'actifs' && state.actifs);
-    const loader = state.screen === 'history'
-      ? () => loadSales()
-      : (state.screen === 'actifs' ? () => loadActifs() : () => loadForfaits());
-    const busyLabel = state.screen === 'history'
-      ? 'Chargement du rapport…'
-      : (state.screen === 'actifs' ? 'Lecture des sessions…' : 'Chargement des forfaits…');
-    await runBusyRender(render, async () => {
-      try { await loader(); } catch (error) { showToast(error.message, 'err'); }
-    }, {
-      resetScroll: true,
-      quiet,
-      busyLabel,
-      before: () => { state.busy = true; },
-      after: () => { state.busy = false; },
-    });
+    if (state.screen === 'actifs') {
+      const quiet = Boolean(state.actifs);
+      await runBusyRender(render, async () => {
+        try { await loadActifs(); } catch (error) { showToast(error.message, 'err'); }
+      }, {
+        resetScroll: true,
+        quiet,
+        busyLabel: 'Lecture des sessions…',
+        before: () => { state.busy = true; },
+        after: () => { state.busy = false; },
+      });
+      return;
+    }
+    if (state.screen === 'history') {
+      refreshSalesView({ resetScroll: true });
+      return;
+    }
+    showForfaits();
     return;
   }
   if (action === 'choose') {
@@ -648,11 +700,7 @@ async function onVendeurClick(event) {
       state.salesFrom = state.report.monthFrom;
       state.salesTo = state.report.todayDate;
     }
-    await runBusyRender(render, () => loadSales(), {
-      busyLabel: 'Chargement du rapport…',
-      before: () => { state.busy = true; },
-      after: () => { state.busy = false; },
-    });
+    refreshSalesView();
     return;
   }
   if (action === 'qr') {
@@ -750,7 +798,9 @@ async function boot() {
   watchIdle(idleLogout);
   if (await enforceAppUpdate()) return;
   if (typeof hydrateWorkspaceLicense === 'function') {
-    await hydrateWorkspaceLicense().catch(() => {});
+    hydrateWorkspaceLicense().then(() => {
+      if (state.authed) render();
+    }).catch(() => {});
   }
   render();
   try {
@@ -768,7 +818,10 @@ async function boot() {
     state.me = await api('/api/vendeur/me');
     state.authed = true;
     const dropped = typeof resellerDroppedByPlan === 'function' && resellerDroppedByPlan(state.me.id);
-    if (!dropped) await loadForfaits();
+    if (!dropped) {
+      state.routerSync = true;
+      await loadForfaits({ sync: false });
+    }
     markActivity();
     idleLogout.done = false;
   } catch (error) {
@@ -781,6 +834,9 @@ async function boot() {
     hideAppBusy();
   }
   render({ resetScroll: true });
+  if (state.authed && state.me && !(typeof resellerDroppedByPlan === 'function' && resellerDroppedByPlan(state.me.id))) {
+    refreshForfaitsFromRouter();
+  }
 }
 
 boot();

@@ -293,7 +293,9 @@ function renderProfiles() {
     <section class="card">
       ${routerPick}
     </section>
-    ${state.profilesRouterId ? (cards || '<section class="card"><p class="meta">Aucun forfait.</p></section>') : ''}
+    ${state.profilesRouterId
+      ? (cards || '<section class="card"><p class="meta">Aucun forfait. Sur Routeurs, le bouton Forfaits relit les profils hotspot du MikroTik.</p></section>')
+      : '<section class="card"><p class="meta">Enregistrez d’abord un routeur.</p></section>'}
   `;
 }
 
@@ -342,6 +344,9 @@ function renderResellers() {
           </button>
           <button type="button" class="${reseller.active ? 'btn-danger' : 'btn-quiet'}" data-action="toggle-reseller" data-id="${reseller.id}" data-active="${reseller.active ? '0' : '1'}">
             ${reseller.active ? 'Désactiver' : 'Réactiver'}
+          </button>
+          <button type="button" class="btn-danger" data-action="delete-reseller" data-id="${reseller.id}" ${state.busy ? 'disabled' : ''}>
+            Supprimer
           </button>
         </div>
         ${state.lotOpen === reseller.id ? renderLot(reseller) : ''}
@@ -682,6 +687,7 @@ function renderSales() {
         <label>Revendeur</label>
         <select name="resellerId">${resellerOptions}</select>
         <button type="submit">Afficher</button>
+        <button type="button" class="btn-quiet" data-action="export-sales-pdf" ${sales ? '' : 'disabled'}>Enregistrer le PDF</button>
       </form>
       ${sales ? `
         <div class="report-line"><span>Comptabilisé${periodLabel ? ` (${esc(periodLabel)})` : ''}<span class="report-tickets">${esc(sales.period.count)} ticket${sales.period.count === 1 ? '' : 's'}</span></span><strong>${esc(money(sales.period.amount))}</strong></div>
@@ -1035,7 +1041,7 @@ function refreshMoneyView() {
 }
 
 function prefetchSales() {
-  api('/api/admin/sales?sync=1').then((sales) => {
+  api('/api/admin/sales?sync=0').then((sales) => {
     if (!state.sales) state.sales = sales;
     if (state.tab === 'sales' && !state.moneySyncing) {
       state.sales = sales;
@@ -1226,8 +1232,27 @@ app.addEventListener('submit', async (event) => {
     }
     if (form.dataset.form === 'router') {
       const created = await api('/api/admin/routers', { method: 'POST', body: data });
-      if (created?.router?.id) applyScopeRouter(created.router.id);
-      await refresh('Routeur enregistré.', { fromSubmit: true });
+      const routerId = Number(created?.router?.id) || 0;
+      if (routerId) applyScopeRouter(routerId);
+      await loadWorkspace({ light: true });
+      if (!routerId) {
+        showToast('Routeur enregistré.', 'ok');
+        return;
+      }
+      showAppBusy('Chargement des forfaits…');
+      try {
+        const result = await api(`/api/admin/routers/${routerId}/sync`, { method: 'POST', body: {} });
+        state.tab = 'profiles';
+        state.profilesRouterId = routerId;
+        state.profiles = result.profiles || [];
+        showToast(
+          result.count ? `${result.count} forfait(s) chargé(s).` : 'Routeur enregistré. Aucun forfait hotspot sur ce routeur.',
+          result.count ? 'ok' : 'err',
+          result.count ? 4000 : 7000,
+        );
+      } catch (error) {
+        showToast(`Routeur enregistré. ${error.message || 'Les forfaits n’ont pas pu être lus.'}`, 'err', 8000);
+      }
       return;
     }
     if (form.dataset.form === 'edit-router') {
@@ -1477,6 +1502,28 @@ async function onAdminClick(event) {
     }
     return;
   }
+  if (action === 'export-sales-pdf') {
+    if (!state.sales) {
+      showToast('Affichez d’abord le rapport.', 'err');
+      return;
+    }
+    try {
+      const reseller = (state.resellers || []).find((item) => item.id === state.salesResellerId);
+      const router = (state.routers || []).find((item) => item.id === state.scopeRouterId);
+      const filter = {
+        from: state.salesFrom || state.sales.period?.from || '',
+        to: state.salesTo || state.sales.period?.to || '',
+        reseller: reseller ? reseller.hmpName : 'Tous les revendeurs',
+        router: router ? router.name : 'Tous les routeurs',
+      };
+      const bytes = buildSalesReportPdf(state.sales, filter);
+      await saveReportPdf(bytes, salesReportFileName(filter));
+      showToast('Choisissez où enregistrer le PDF.', 'ok');
+    } catch (error) {
+      showToast(error.message || 'PDF impossible.', 'err');
+    }
+    return;
+  }
   if (action === 'drive-upload') {
     if (typeof licenseAllowsDrive === 'function' && !licenseAllowsDrive()) {
       showToast('Votre offre n’inclut pas Drive.', 'err');
@@ -1624,7 +1671,7 @@ async function onAdminClick(event) {
     }
     return;
   }
-  if (!['test-router', 'sync-router', 'delete-router', 'toggle-reseller'].includes(action)) return;
+  if (!['test-router', 'sync-router', 'delete-router', 'toggle-reseller', 'delete-reseller'].includes(action)) return;
   if (state.busy) return;
   if (action === 'delete-router') {
     const agreed = await showConfirm({
@@ -1642,6 +1689,15 @@ async function onAdminClick(event) {
       text: disable ? 'Il ne pourra plus vendre.' : 'Il pourra à nouveau vendre.',
       confirmLabel: disable ? 'Désactiver' : 'Réactiver',
       danger: disable,
+    });
+    if (!agreed) return;
+  }
+  if (action === 'delete-reseller') {
+    const agreed = await showConfirm({
+      title: 'Supprimer ce revendeur ?',
+      text: 'Il disparaît de la liste. Les ventes déjà comptées restent dans les recettes. Les tickets qui lui étaient attribués redeviennent libres.',
+      confirmLabel: 'Supprimer',
+      danger: true,
     });
     if (!agreed) return;
   }
@@ -1677,6 +1733,16 @@ async function onAdminClick(event) {
           body: { active: button.dataset.active === '1' },
         });
         showToast(button.dataset.active === '1' ? 'Revendeur réactivé.' : 'Revendeur désactivé.', 'ok');
+        await loadWorkspace();
+        return;
+      }
+      if (action === 'delete-reseller') {
+        await api(`/api/admin/resellers/${routerId}`, { method: 'DELETE' });
+        if (state.lotOpen === routerId) {
+          state.lotOpen = 0;
+          state.lot = null;
+        }
+        showToast('Revendeur supprimé.', 'ok');
         await loadWorkspace();
       }
     }, {

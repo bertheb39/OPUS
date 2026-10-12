@@ -291,7 +291,7 @@ async function api(url, options = {}) {
   return localApi(url, options);
 }
 
-const APP_VERSION = '2.8.8';
+const APP_VERSION = '2.8.9';
 const UPDATE_REPO = 'bertheb39/OPUS';
 const activityKey = 'opus.activity';
 const currencyKey = 'opus.currency';
@@ -435,20 +435,33 @@ function clearMandatoryUpdate() {
   enforceAppUpdate.locked = false;
 }
 
-async function enforceAppUpdate() {
-  let target = null;
-  try {
-    target = await resolveLatestReleaseUpdate();
-  } catch {
-    return Boolean(enforceAppUpdate.locked);
-  }
+function applyUpdateTarget(target) {
   if (!target || !target.version || !target.downloadUrl || !versionIsNewer(target.version, APP_VERSION)) {
-    clearMandatoryUpdate();
+    if (!enforceAppUpdate.locked) clearMandatoryUpdate();
     return false;
   }
   enforceAppUpdate.locked = true;
   showMandatoryUpdate(target);
   return true;
+}
+
+async function enforceAppUpdate() {
+  const pending = resolveLatestReleaseUpdate().catch(() => null);
+  let timedOut = false;
+  const target = await Promise.race([
+    pending,
+    new Promise((resolve) => {
+      setTimeout(() => {
+        timedOut = true;
+        resolve('timeout');
+      }, 2500);
+    }),
+  ]);
+  if (timedOut) {
+    pending.then((found) => { applyUpdateTarget(found); }).catch(() => {});
+    return Boolean(enforceAppUpdate.locked);
+  }
+  return applyUpdateTarget(target);
 }
 
 async function checkForUpdate() {
@@ -817,6 +830,19 @@ function installAboutEntry() {
   actions.insertAdjacentHTML('afterbegin', aboutInfoButtonHtml());
 }
 
+function tutorialHref(value) {
+  let raw = String(value || '').trim();
+  if (!raw) return '';
+  if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return '';
+    return url.href;
+  } catch {
+    return '';
+  }
+}
+
 function openContactLink(url) {
   const plugin = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.RouterOs;
   if (url.startsWith('tel:') && plugin && plugin.openExternal) {
@@ -851,6 +877,10 @@ async function openAboutSheet() {
           Appel
         </button>
       </div>
+      <button type="button" class="about-tuto" data-about-tuto hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M10.2 8.6v6.8l5.6-3.4z"/></svg>
+        Tuto
+      </button>
       <button type="button" class="btn-block btn-quiet" data-close-about>Fermer</button>
     </section>
   `;
@@ -862,16 +892,19 @@ async function openAboutSheet() {
   });
   let phone = '';
   let whatsapp = '';
+  let tutorial = '';
   try {
     if (typeof loadPublicContact === 'function') {
       const contact = await loadPublicContact();
       phone = String(contact?.contactPhone || '').trim();
       whatsapp = String(contact?.contactWhatsapp || '').trim() || phone;
+      tutorial = tutorialHref(contact?.tutorialUrl);
     }
   } catch { phone = ''; }
   if (!root.isConnected) return;
   const wa = root.querySelector('[data-about-wa]');
   const call = root.querySelector('[data-about-call]');
+  const tuto = root.querySelector('[data-about-tuto]');
   if (whatsapp) {
     const digits = String(whatsapp).replace(/\D/g, '').replace(/^00/, '');
     wa.disabled = false;
@@ -881,6 +914,46 @@ async function openAboutSheet() {
     const tel = `tel:${phone.replace(/\s/g, '')}`;
     call.disabled = false;
     call.addEventListener('click', () => openContactLink(tel));
+  }
+  const founder = typeof isFounderLicense === 'function' && isFounderLicense();
+  const canSaveTutorial = founder && typeof saveTutorialLink === 'function';
+  if (tutorial) {
+    tuto.hidden = false;
+    tuto.addEventListener('click', () => openContactLink(tutorial));
+  }
+  if (canSaveTutorial) {
+    const field = document.createElement('div');
+    field.className = 'about-tuto-field';
+    field.innerHTML = `
+      <label>Lien de la playlist</label>
+      <input data-about-tuto-url type="url" inputmode="url" placeholder="https://youtube.com/playlist?list=…" autocomplete="off" value="${esc(tutorial)}">
+      <button type="button" class="btn-block btn-quiet" data-about-tuto-save>Enregistrer le lien</button>
+    `;
+    tuto.insertAdjacentElement('afterend', field);
+    field.querySelector('[data-about-tuto-save]').addEventListener('click', async () => {
+      const input = field.querySelector('[data-about-tuto-url]');
+      const button = field.querySelector('[data-about-tuto-save]');
+      const next = tutorialHref(input.value);
+      if (String(input.value || '').trim() && !next) {
+        showToast('Le lien du tuto doit être une adresse http ou https.', 'err');
+        return;
+      }
+      if (typeof readOperatorAuth === 'function' && !readOperatorAuth()) {
+        showToast('Connectez l’opérateur dans Clients, puis enregistrez le lien.', 'err', 5000);
+        return;
+      }
+      button.disabled = true;
+      try {
+        await saveTutorialLink(next);
+        if (typeof clearPublicContactCache === 'function') clearPublicContactCache();
+        showToast(next ? 'Lien du tuto enregistré.' : 'Lien du tuto retiré.', 'ok');
+        close();
+        openAboutSheet();
+      } catch (error) {
+        showToast(error.message, 'err', 5000);
+        button.disabled = false;
+      }
+    });
   }
 }
 

@@ -250,6 +250,51 @@ header .about-info {
   background: var(--brand-dark);
 }
 
+.about-tuto {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin: 0 0 8px;
+  padding: 10px 8px;
+  border-radius: 12px;
+  background: #fff;
+  color: var(--brand-dark);
+  border: 1.5px solid var(--brand-dark);
+}
+
+.about-tuto[hidden] {
+  display: none;
+}
+
+.about-tuto svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+}
+
+.about-tuto svg path {
+  fill: currentColor;
+  stroke: none;
+}
+
+.about-tuto-field {
+  margin: 0 0 8px;
+  text-align: left;
+}
+
+.about-tuto-field label {
+  margin-top: 0;
+}
+
+.about-tuto-field input {
+  text-align: left;
+}
+
 .pay-means {
   margin: 8px 0 12px;
 }
@@ -694,6 +739,61 @@ button:disabled { opacity: 0.55; cursor: default; }
 
 .actions button,
 .actions .btn { width: 100%; margin-top: 0; }
+
+.actions .client-delete { grid-column: 1 / -1; }
+
+#clients-modal .clients-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(520px, 100%);
+  max-height: 100%;
+  overflow: hidden;
+  padding: 16px 14px 12px;
+  text-align: left;
+}
+
+#clients-modal .clients-modal h2 { text-align: center; }
+
+.client-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.client-filters button {
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid #c5d0da;
+  background: #f4f7fa;
+  color: var(--ink);
+  border-radius: 999px;
+  font-size: 13px;
+}
+
+.client-filters button.is-on {
+  border-color: var(--brand-dark);
+  background: var(--brand-dark);
+  color: #fff;
+}
+
+#clients-modal .client-state {
+  width: 100%;
+  margin: 0;
+}
+
+#clients-modal .clients-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  margin-top: 8px;
+}
+
+#clients-modal .modal-actions {
+  grid-template-columns: 1fr;
+  flex: 0 0 auto;
+  background: white;
+}
 
 .field-row {
   display: grid;
@@ -1318,11 +1418,54 @@ body.has-dock main > .modal-overlay > .modal {
   font-size: 13px;
 }
 
-.presets, .date-pair {
+.presets {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 6px;
   margin: 8px 0;
+}
+
+.date-pair {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0;
+  width: 100%;
+  min-width: 0;
+}
+
+.date-pair > div {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.date-pair label { margin-top: 0; }
+
+.date-pair input[type="date"] {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 10px 4px 10px 8px;
+  font-size: 14px;
+}
+
+.date-pair input[type="date"]::-webkit-datetime-edit {
+  display: inline-block;
+  min-width: 0;
+  padding: 0;
+}
+
+.date-pair input[type="date"]::-webkit-datetime-edit-fields-wrapper {
+  min-width: 0;
+  padding: 0;
+}
+
+.date-pair input[type="date"]::-webkit-calendar-picker-indicator {
+  margin: 0;
+  padding: 0;
 }
 
 .presets button { margin-top: 0; padding: 10px 8px; }
@@ -1425,9 +1568,34 @@ body.has-dock main > .modal-overlay > .modal {
 .recettes-sub-head,
 .recettes-sub {
   display: grid;
-  grid-template-columns: 1.4fr 1fr 1fr 1fr;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
   gap: 6px;
   font-size: 12px;
+  min-width: 0;
+}
+
+.recettes-sub-head span,
+.recettes-sub span {
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  .recettes-sub-head { display: none; }
+  .recettes-sub {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+    padding: 8px 0;
+  }
+  .recettes-sub span:nth-child(1) { font-weight: 700; }
+  .recettes-sub span:nth-child(2)::before,
+  .recettes-sub span:nth-child(3)::before,
+  .recettes-sub span:nth-child(4)::before {
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .recettes-sub span:nth-child(2)::before { content: "Ventes · "; }
+  .recettes-sub span:nth-child(3)::before { content: "Revendeur · "; }
+  .recettes-sub span:nth-child(4)::before { content: "Réseau · "; }
 }
 
 .recettes-sub-head {

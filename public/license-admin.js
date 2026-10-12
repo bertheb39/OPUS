@@ -100,16 +100,281 @@ async function operatorFirestore(path, options = {}) {
   return response;
 }
 
+async function listOperatorCollection(collectionId) {
+  const documents = [];
+  let pageToken = '';
+  let status = 200;
+  do {
+    const query = `pageSize=300${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
+    const response = await operatorFirestore(`${collectionId}?${query}`);
+    status = response.status;
+    if (!response.ok) return { ok: false, status, documents };
+    const data = await response.json();
+    documents.push(...(data.documents || []));
+    pageToken = data.nextPageToken || '';
+  } while (pageToken);
+  return { ok: true, status, documents };
+}
+
 async function loadLicenseClients() {
-  const response = await operatorFirestore('licenses');
-  if (response.status === 403) {
+  const listed = await listOperatorCollection('licenses');
+  if (listed.status === 403) {
     throw new Error('Les règles Firestore refusent la liste. Publiez les règles opérateur (request.auth != null).');
   }
-  if (!response.ok) throw new Error('Impossible de lire les clients.');
-  const data = await response.json();
-  return (data.documents || []).map(parseListedLicense).sort((a, b) => (
+  if (!listed.ok) throw new Error('Impossible de lire les clients.');
+  return listed.documents.map(parseListedLicense).sort((a, b) => (
     a.clientName.localeCompare(b.clientName, 'fr') || a.code.localeCompare(b.code)
   ));
+}
+
+function parseListedWorkspace(doc) {
+  const name = String(doc.name || '');
+  const id = decodeURIComponent(name.split('/').pop() || '');
+  const fields = doc.fields || {};
+  return {
+    id,
+    code: typeof firestoreString === 'function' ? firestoreString(fields, 'code') : '',
+    clientName: typeof firestoreString === 'function' ? firestoreString(fields, 'clientName') : '',
+    phone: typeof firestoreString === 'function' ? firestoreString(fields, 'phone') : '',
+    plan: typeof firestoreString === 'function' ? firestoreString(fields, 'plan').trim().toLowerCase() : '',
+    status: typeof firestoreString === 'function' ? firestoreString(fields, 'status').toLowerCase() : '',
+    endsAt: typeof firestoreString === 'function' ? firestoreString(fields, 'endsAt') : '',
+    seenAt: typeof firestoreString === 'function' ? firestoreString(fields, 'seenAt') : '',
+    removed: typeof firestoreString === 'function' ? firestoreString(fields, 'removed') : '',
+  };
+}
+
+async function loadAppUsers() {
+  const listed = await listOperatorCollection('workspaces');
+  if (listed.status === 403) {
+    throw new Error('Liste des téléphones refusée. Dans Firestore → Règles, autorisez workspaces : lecture si request.auth != null, création et mise à jour publiques.');
+  }
+  if (!listed.ok) throw new Error('Impossible de lire les téléphones qui ont ouvert l’application.');
+  return listed.documents.map(parseListedWorkspace).filter((item) => item.code);
+}
+
+function formatSeenAt(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  if (typeof formatDateTime === 'function') return formatDateTime(date.toISOString());
+  return value.slice(0, 16).replace('T', ' ');
+}
+
+const clientListUi = { query: '', kind: 'all', state: 'all' };
+
+function isEssaiClient(item) {
+  return item?.plan === 'essai' || String(item?.code || '').startsWith('HT-ESSAI');
+}
+
+function isFounderClient(item) {
+  if (!item?.code || item.plan === 'fondateur') return true;
+  const code = typeof normalizeLicenseCode === 'function' ? normalizeLicenseCode(item.code) : String(item.code).toUpperCase();
+  return code === 'HT-FONDATEUR-001';
+}
+
+function clientRows() {
+  const licenses = state.licenseClients || [];
+  const byCode = new Map(licenses.map((item) => [item.code, item]));
+  const rows = new Map();
+  (state.appUsers || []).forEach((user) => {
+    if (!user.code || user.removed === '1' || isFounderClient(user)) return;
+    const license = byCode.get(user.code);
+    if (license?.removed === '1' || (license && isFounderClient(license))) return;
+    const existing = rows.get(user.code);
+    if (existing) {
+      if (user.id) existing.workspaceIds.push(user.id);
+      if (String(user.seenAt) > String(existing.seenAt)) existing.seenAt = user.seenAt;
+      return;
+    }
+    rows.set(user.code, {
+      code: user.code,
+      clientName: user.clientName || license?.clientName || '',
+      phone: user.phone || license?.phone || '',
+      plan: user.plan || license?.plan || '',
+      status: license?.status || user.status || '',
+      endsAt: license?.endsAt || user.endsAt || '',
+      seenAt: user.seenAt || '',
+      opened: true,
+      hasLicense: Boolean(license) && !isEssaiClient(license),
+      workspaceIds: user.id ? [user.id] : [],
+    });
+  });
+  licenses.forEach((license) => {
+    if (!license.code || license.removed === '1' || isFounderClient(license) || rows.has(license.code)) return;
+    rows.set(license.code, {
+      code: license.code,
+      clientName: license.clientName || '',
+      phone: license.phone || '',
+      plan: license.plan || '',
+      status: license.status || '',
+      endsAt: license.endsAt || '',
+      seenAt: '',
+      opened: false,
+      hasLicense: !isEssaiClient(license),
+      workspaceIds: [],
+    });
+  });
+  return [...rows.values()].sort((a, b) => (
+    String(b.seenAt).localeCompare(String(a.seenAt)) || a.clientName.localeCompare(b.clientName, 'fr')
+  ));
+}
+
+function clientIsLive(item) {
+  if (item.status === 'suspended' || item.status === 'revoked') return false;
+  if (item.endsAt && typeof licenseToday === 'function' && item.endsAt < licenseToday()) return false;
+  return item.status === 'active' || item.status === '';
+}
+
+function clientMatches(item) {
+  const essai = isEssaiClient(item);
+  if (clientListUi.kind === 'essai' && !essai) return false;
+  if (clientListUi.kind === 'licence' && (essai || !item.hasLicense)) return false;
+  if (clientListUi.kind === 'pending' && item.opened) return false;
+  if (clientListUi.state === 'live' && !clientIsLive(item)) return false;
+  if (clientListUi.state === 'stopped' && clientIsLive(item)) return false;
+  const query = clientListUi.query.trim().toLowerCase();
+  if (!query) return true;
+  const plan = typeof licensePlanLabel === 'function' ? licensePlanLabel(item.plan) : item.plan;
+  return [item.clientName, item.phone, item.code, plan].join(' ').toLowerCase().includes(query);
+}
+
+function clientCardHtml(item) {
+  const plan = typeof licensePlanLabel === 'function' ? licensePlanLabel(item.plan) : (item.plan || '—');
+  const title = item.clientName || (isEssaiClient(item) ? 'Essai' : 'Client');
+  const seenAt = formatSeenAt(item.seenAt);
+  const expired = item.endsAt && typeof licenseToday === 'function' && item.endsAt < licenseToday();
+  const stateLabel = item.status === 'suspended'
+    ? 'suspendu'
+    : item.status === 'revoked'
+      ? 'révoqué'
+      : (expired ? 'expiré' : (item.status || 'actif'));
+  const where = item.opened
+    ? (seenAt ? `vu ${seenAt}` : 'application ouverte')
+    : 'code pas encore ouvert';
+  const manage = item.hasLicense ? `
+        <button type="button" data-action="client-extend" data-months="1" data-code="${esc(item.code)}">+1 mois</button>
+        <button type="button" data-action="client-extend" data-months="3" data-code="${esc(item.code)}">+3 mois</button>
+        <button type="button" class="btn-quiet" data-action="client-detach" data-code="${esc(item.code)}">Détacher</button>
+        <button type="button" class="btn-quiet" data-action="client-reset-password" data-code="${esc(item.code)}">Réinit. mot de passe</button>
+        ${item.status === 'active' && !expired
+          ? `<button type="button" class="btn-quiet" data-action="client-suspend" data-code="${esc(item.code)}">Suspendre</button>`
+          : `<button type="button" class="btn-quiet" data-action="client-activate" data-code="${esc(item.code)}">Réactiver</button>`}
+  ` : '';
+  return `
+    <article class="card">
+      <div class="profile-head">
+        <h2>${esc(title)}</h2>
+        <span class="meta">${esc(plan)} · ${esc(stateLabel)}</span>
+      </div>
+      <p class="meta"><strong>${esc(item.code)}</strong> · fin ${esc(item.endsAt || '—')}</p>
+      <p class="meta">${esc(item.phone || 'Téléphone non renseigné')} · ${esc(where)}</p>
+      <div class="actions">
+        ${manage}
+        <button type="button" class="btn-danger client-delete" data-action="client-delete" data-code="${esc(item.code)}">Supprimer</button>
+      </div>
+    </article>
+  `;
+}
+
+function paintClientList() {
+  const host = document.querySelector('#clients-modal [data-client-list]');
+  const count = document.querySelector('#clients-modal [data-client-count]');
+  if (!host) return;
+  const rows = clientRows().filter(clientMatches);
+  if (count) count.textContent = rows.length > 1 ? `${rows.length} clients` : `${rows.length} client`;
+  host.innerHTML = rows.map(clientCardHtml).join('') || '<p class="meta">Aucun client pour ce filtre.</p>';
+}
+
+function openClientsModal() {
+  let overlay = document.getElementById('clients-modal');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'clients-modal';
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <section class="modal modal-form clients-modal" role="dialog" aria-modal="true" aria-labelledby="clients-modal-title">
+        <h2 id="clients-modal-title">Clients</h2>
+        <input data-client-query type="search" placeholder="Nom, téléphone ou code" autocomplete="off" value="${esc(clientListUi.query)}">
+        <div class="client-filters" data-client-kind>
+          <button type="button" data-kind="all" class="${clientListUi.kind === 'all' ? 'is-on' : ''}">Tous</button>
+          <button type="button" data-kind="essai" class="${clientListUi.kind === 'essai' ? 'is-on' : ''}">Essai</button>
+          <button type="button" data-kind="licence" class="${clientListUi.kind === 'licence' ? 'is-on' : ''}">Licence</button>
+          <button type="button" data-kind="pending" class="${clientListUi.kind === 'pending' ? 'is-on' : ''}">Pas ouvert</button>
+        </div>
+        <select data-client-state class="client-state">
+          <option value="all" ${clientListUi.state === 'all' ? 'selected' : ''}>Tous les états</option>
+          <option value="live" ${clientListUi.state === 'live' ? 'selected' : ''}>En cours</option>
+          <option value="stopped" ${clientListUi.state === 'stopped' ? 'selected' : ''}>Coupés ou expirés</option>
+        </select>
+        <p class="meta" data-client-count></p>
+        ${state.appUsersError ? `<p class="meta">${esc(state.appUsersError)}</p>` : ''}
+        <div class="clients-list" data-client-list></div>
+        <div class="modal-actions">
+          <button type="button" class="btn-quiet" data-close-clients>Fermer</button>
+        </div>
+      </section>
+    `;
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) overlay.remove();
+    });
+    overlay.querySelector('[data-close-clients]').addEventListener('click', () => overlay.remove());
+    overlay.querySelector('[data-client-query]').addEventListener('input', (event) => {
+      clientListUi.query = event.target.value;
+      paintClientList();
+    });
+    overlay.querySelector('[data-client-kind]').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-kind]');
+      if (!button) return;
+      clientListUi.kind = button.dataset.kind || 'all';
+      overlay.querySelectorAll('[data-kind]').forEach((el) => el.classList.toggle('is-on', el === button));
+      paintClientList();
+    });
+    overlay.querySelector('[data-client-state]').addEventListener('change', (event) => {
+      clientListUi.state = event.target.value || 'all';
+      paintClientList();
+    });
+    (document.querySelector('body.has-dock main') || document.body).appendChild(overlay);
+  }
+  paintClientList();
+}
+
+async function deleteOrHideLicense(code) {
+  const deleted = await operatorFirestore(`licenses/${encodeURIComponent(code)}`, { method: 'DELETE' });
+  if (deleted.ok || deleted.status === 404) return;
+  const patched = await operatorFirestore(
+    `licenses/${encodeURIComponent(code)}?updateMask.fieldPaths=status&updateMask.fieldPaths=removed`,
+    { method: 'PATCH', body: JSON.stringify(licenseFieldsPayload({ status: 'revoked', removed: '1' })) },
+  );
+  if (!patched.ok) {
+    throw new Error('Suppression refusée. Dans Firestore → Règles, autorisez la suppression des licences pour l’opérateur.');
+  }
+}
+
+async function hideWorkspace(id) {
+  const response = await operatorFirestore(
+    `workspaces/${encodeURIComponent(id)}?updateMask.fieldPaths=removed`,
+    { method: 'PATCH', body: JSON.stringify(licenseFieldsPayload({ removed: '1' })) },
+  );
+  if (!response.ok && response.status !== 404) {
+    throw new Error('Le téléphone reste visible. Autorisez la mise à jour de workspaces dans les règles Firestore.');
+  }
+}
+
+async function deleteListedClient(row) {
+  if (!row?.code || isFounderClient(row)) throw new Error('Le fondateur ne se supprime pas.');
+  const license = (state.licenseClients || []).find((item) => item.code === row.code && !isFounderClient(item));
+  if (license) await deleteOrHideLicense(row.code);
+  const ids = new Set(row.workspaceIds || []);
+  (state.appUsers || []).forEach((user) => {
+    if (user.code === row.code && user.id && user.removed !== '1') ids.add(user.id);
+  });
+  if (!license && ids.size === 0) throw new Error('Client introuvable.');
+  await Promise.all([...ids].map((id) => hideWorkspace(id)));
+  const phoneKey = typeof licensePhoneKey === 'function' ? licensePhoneKey(row.phone) : '';
+  if (phoneKey && license) {
+    await operatorFirestore(`license_lookups/${encodeURIComponent(phoneKey)}`, { method: 'DELETE' });
+  }
 }
 
 async function createLicenseClient(data) {
@@ -234,26 +499,6 @@ function renderClients() {
       </section>
     `;
   }
-  const rows = (state.licenseClients || []).map((item) => `
-    <article class="card">
-      <div class="profile-head">
-        <h2>${esc(item.clientName || item.code)}</h2>
-        <span class="meta">${esc(item.plan)} · ${esc(item.status)}</span>
-      </div>
-      <p class="meta"><strong>${esc(item.code)}</strong> · fin ${esc(item.endsAt || '—')} · ${item.plan === 'fondateur' ? 'appareils illimités' : (item.deviceId ? 'téléphone lié' : 'pas encore lié')}</p>
-      <p class="meta">${esc(item.phone || '—')}${item.notes ? ` · ${esc(item.notes)}` : ''}</p>
-      <div class="actions">
-        <button type="button" data-action="client-extend" data-months="1" data-code="${esc(item.code)}">+1 mois</button>
-        <button type="button" data-action="client-extend" data-months="3" data-code="${esc(item.code)}">+3 mois</button>
-        ${item.plan === 'fondateur' ? '' : `<button type="button" class="btn-quiet" data-action="client-detach" data-code="${esc(item.code)}">Détacher</button>`}
-        <button type="button" class="btn-quiet" data-action="client-reset-password" data-code="${esc(item.code)}">Autoriser réinit. mot de passe</button>
-        ${item.status === 'active'
-          ? `<button type="button" class="btn-quiet" data-action="client-suspend" data-code="${esc(item.code)}">Suspendre</button>`
-          : `<button type="button" class="btn-quiet" data-action="client-activate" data-code="${esc(item.code)}">Réactiver</button>`}
-        <button type="button" class="btn-danger" data-action="client-revoke" data-code="${esc(item.code)}">Révoquer</button>
-      </div>
-    </article>
-  `).join('');
   const plans = state.licensePlans || defaultSubscriptionPlans();
   const pending = (state.licenseRequests || []).filter((item) => item.status === 'pending');
   const planFields = plans.map((plan) => `
@@ -291,7 +536,14 @@ function renderClients() {
     </article>
   `;
   }).join('');
+  const clientCount = clientRows().length;
   return `
+    <section class="card">
+      <h2>Clients</h2>
+      <p class="meta">Essais et licences, avec recherche et filtres. ${clientCount > 1 ? `${clientCount} clients` : `${clientCount} client`}.</p>
+      ${state.appUsersError ? `<p class="meta">${esc(state.appUsersError)}</p>` : ''}
+      <button type="button" data-action="open-clients">Voir les clients</button>
+    </section>
     <section class="card">
       <h2>Tarifs des abonnements</h2>
       <p class="meta">Les clients voient ces offres avant de demander un code.</p>
@@ -338,7 +590,6 @@ function renderClients() {
         <button type="submit">Créer et afficher le code</button>
       </form>
     </section>
-    ${rows || '<section class="card"><p class="meta">Aucun client pour l’instant.</p></section>'}
   `;
 }
 
@@ -532,6 +783,9 @@ async function openPayMeansModal() {
         <input name="contactPhone" value="${esc(current.contactPhone || '')}" inputmode="tel" placeholder="Indicatif + numéro, ex. 22670000000" autocomplete="off">
         <label>Numéro WhatsApp</label>
         <input name="contactWhatsapp" value="${esc(current.contactWhatsapp || '')}" inputmode="tel" placeholder="Laisser vide = même numéro que l’appel" autocomplete="off">
+        <label>Playlist de présentation</label>
+        <input name="tutorialUrl" type="url" inputmode="url" value="${esc(current.tutorialUrl || '')}" placeholder="https://youtube.com/playlist?list=…" autocomplete="off">
+        <p class="meta">Ce lien s’ouvre avec le bouton Tuto dans À propos. Laissez vide pour masquer le bouton.</p>
         <div class="modal-actions">
           <button type="button" class="btn-quiet" data-cancel>Annuler</button>
           <button type="submit">Enregistrer</button>
@@ -576,15 +830,19 @@ async function savePublicContact(form) {
   })).filter((item) => item.name && item.phone).slice(0, 8);
   const contactPhone = String(form.elements.contactPhone.value || '').trim();
   const contactWhatsapp = String(form.elements.contactWhatsapp.value || '').trim();
+  const tutorialRaw = String(form.elements.tutorialUrl?.value || '').trim();
+  const tutorialUrl = typeof tutorialHref === 'function' ? tutorialHref(tutorialRaw) : tutorialRaw;
+  if (tutorialRaw && !tutorialUrl) throw new Error('Le lien du tuto doit être une adresse http ou https.');
   const record = {
     payments: JSON.stringify(payments),
     contactPhone,
     contactWhatsapp,
+    tutorialUrl,
     active: '0',
     name: 'Paiements',
   };
   const payload = licenseFieldsPayload(record);
-  const masks = ['payments', 'contactPhone', 'contactWhatsapp', 'active', 'name']
+  const masks = ['payments', 'contactPhone', 'contactWhatsapp', 'tutorialUrl', 'active', 'name']
     .map((key) => `updateMask.fieldPaths=${key}`)
     .join('&');
   let response = await operatorFirestore(`plans/paiements?${masks}`, {
@@ -595,6 +853,35 @@ async function savePublicContact(form) {
     response = await operatorFirestore('plans?documentId=paiements', {
       method: 'POST',
       body: JSON.stringify(payload),
+    });
+  }
+  if (!response.ok) {
+    throw new Error('Enregistrement refusé. Publiez les règles plans, comme pour les tarifs.');
+  }
+}
+
+async function saveTutorialLink(url) {
+  const tutorialUrl = typeof tutorialHref === 'function' ? tutorialHref(url) : String(url || '').trim();
+  if (String(url || '').trim() && !tutorialUrl) {
+    throw new Error('Le lien du tuto doit être une adresse http ou https.');
+  }
+  const record = { tutorialUrl };
+  const payload = licenseFieldsPayload(record);
+  let response = await operatorFirestore('plans/paiements?updateMask.fieldPaths=tutorialUrl', {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+  if (response.status === 404) {
+    response = await operatorFirestore('plans?documentId=paiements', {
+      method: 'POST',
+      body: JSON.stringify(licenseFieldsPayload({
+        tutorialUrl,
+        payments: '[]',
+        contactPhone: '',
+        contactWhatsapp: '',
+        active: '0',
+        name: 'Paiements',
+      })),
     });
   }
   if (!response.ok) {
@@ -865,6 +1152,8 @@ async function rejectLicenseRequest(id) {
 async function refreshLicenseClients() {
   if (!isFounderOperator() || !readOperatorAuth()) {
     state.licenseClients = [];
+    state.appUsers = [];
+    state.appUsersError = '';
     state.licensePlans = defaultSubscriptionPlans();
     state.essaiPlan = defaultEssaiPlan();
     state.licenseRequests = [];
@@ -875,12 +1164,21 @@ async function refreshLicenseClients() {
     loadLicensePlans(),
     loadLicenseRequests(),
   ]);
+  let users = [];
+  let usersError = '';
+  try {
+    users = await loadAppUsers();
+  } catch (error) {
+    usersError = error.message || 'Impossible de lire les téléphones.';
+  }
   state.licenseClients = clients;
+  state.appUsers = users;
+  state.appUsersError = usersError;
   state.licensePlans = plans;
   state.licenseRequests = requests;
   if (typeof publishLicenseLookup === 'function') {
     clients.forEach((item) => {
-      if (item.phone && item.code && item.plan !== 'fondateur') {
+      if (item.phone && item.code && item.plan !== 'fondateur' && item.removed !== '1') {
         publishLicenseLookup(item).catch(() => {});
       }
     });
@@ -933,6 +1231,12 @@ if (app) {
       event.preventDefault();
       event.stopImmediatePropagation();
       openPayMeansModal().catch((error) => showToast(error.message, 'err'));
+      return;
+    }
+    if (event.target.closest('[data-action="open-clients"]')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      openClientsModal();
       return;
     }
     if (event.target.closest('[data-action="plan-add"]')) {
@@ -1000,6 +1304,27 @@ if (app) {
     event.stopImmediatePropagation();
     const code = button.dataset.code;
     const action = button.dataset.action;
+    if (action === 'client-delete') {
+      const row = clientRows().find((item) => item.code === code);
+      if (!row) return;
+      const who = row.clientName || row.code;
+      if (!window.confirm(`Supprimer ${who} ?\n\nCe client disparaît de la liste. Son essai ou sa licence s’arrête sur le téléphone.`)) return;
+      state.busy = true;
+      showAppBusy('Suppression…');
+      try {
+        await deleteListedClient(row);
+        await refreshLicenseClients();
+        showToast('Client supprimé.', 'ok');
+      } catch (error) {
+        showToast(error.message, 'err', 6000);
+      } finally {
+        state.busy = false;
+        hideAppBusy();
+        if (document.getElementById('clients-modal')) paintClientList();
+        else render();
+      }
+      return;
+    }
     const current = (state.licenseClients || []).find((item) => item.code === code);
     if (!current) return;
     state.busy = true;
@@ -1030,7 +1355,8 @@ if (app) {
     } finally {
       state.busy = false;
       hideAppBusy();
-      render();
+      if (document.getElementById('clients-modal')) paintClientList();
+      else render();
     }
   }, true);
 

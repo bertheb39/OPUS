@@ -315,7 +315,8 @@ function settlementFromSales(sales, resellers, routers = []) {
   for (const [id, rows] of groups) {
     const amount = sumPrices(rows);
     const reseller = map.get(id);
-    const share = shareFromAmount(amount, reseller ? reseller.rate_percent : null);
+    const stamped = rows.find((row) => row.rate_percent != null && row.rate_percent !== '');
+    const share = shareFromAmount(amount, reseller ? reseller.rate_percent : (stamped ? stamped.rate_percent : null));
     const routerId = reseller
       ? Number(reseller.router_id)
       : Number(rows[0]?.router_id) || 0;
@@ -365,7 +366,10 @@ function recettesReport(sales, resellers, routers = []) {
     total += amount;
     const resellerId = Number(sale.reseller_id) || 0;
     const reseller = map.get(resellerId);
-    const share = shareFromAmount(amount, reseller ? reseller.rate_percent : null);
+    const share = shareFromAmount(
+      amount,
+      reseller ? reseller.rate_percent : (sale.rate_percent != null && sale.rate_percent !== '' ? sale.rate_percent : null),
+    );
     const resellerName = (reseller && reseller.hmp_name)
       || sale.reseller_name
       || 'Sans revendeur';
@@ -612,14 +616,50 @@ function scriptListCacheKey(router, owners) {
   return `${Number(router && router.id) || 0}|${host}|${ownerKey}`;
 }
 
+function scriptCacheStorageKey(cacheKey) {
+  return `opus.scripts.${cacheKey}`;
+}
+
+function readPersistedScriptList(cacheKey) {
+  try {
+    const raw = sessionStorage.getItem(scriptCacheStorageKey(cacheKey));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.entries) || Number(parsed.expires) <= Date.now()) {
+      sessionStorage.removeItem(scriptCacheStorageKey(cacheKey));
+      return null;
+    }
+    scriptListCache.set(cacheKey, { entries: parsed.entries, expires: Number(parsed.expires) });
+    return parsed.entries;
+  } catch {
+    return null;
+  }
+}
+
+function writePersistedScriptList(cacheKey, entries) {
+  const expires = Date.now() + SCRIPT_LIST_TTL_MS;
+  scriptListCache.set(cacheKey, { entries, expires });
+  try {
+    sessionStorage.setItem(scriptCacheStorageKey(cacheKey), JSON.stringify({ entries, expires }));
+  } catch {
+    // Quota du navigateur : le cache mémoire suffit pour cette page.
+  }
+}
+
 function invalidateScriptListCache(routerId = 0) {
+  const dropStorage = (key) => {
+    try { sessionStorage.removeItem(scriptCacheStorageKey(key)); } catch { /* ignore */ }
+  };
   if (!routerId) {
+    for (const key of [...scriptListCache.keys()]) dropStorage(key);
     scriptListCache.clear();
     return;
   }
   const prefix = `${Number(routerId)}|`;
   for (const key of [...scriptListCache.keys()]) {
-    if (key.startsWith(prefix)) scriptListCache.delete(key);
+    if (!key.startsWith(prefix)) continue;
+    scriptListCache.delete(key);
+    dropStorage(key);
   }
 }
 
@@ -1531,14 +1571,42 @@ async function hotspotUserExists(router, name) {
   return (results[0]?.rows || []).length > 0;
 }
 
+const hotspotUserCache = new Map();
+const HOTSPOT_USER_TTL_MS = 120000;
+
+function hotspotUserCacheKey(router) {
+  const host = cleanHost(router && (router.admin_host || router.host));
+  return `${Number(router && router.id) || 0}|${host}|${Number(router && router.port) || 0}`;
+}
+
+async function listHotspotUsers(router) {
+  const key = hotspotUserCacheKey(router);
+  const cached = hotspotUserCache.get(key);
+  if (cached && cached.rows && cached.expires > Date.now()) return cached.rows;
+  if (cached && cached.promise) return cached.promise;
+  const loadPromise = (async () => {
+    // Dump complet nécessaire pour NOM et PREFIXE-NOM. Budget long :
+    // un print de milliers d’users dépasse souvent 20 s (surtout via VPN).
+    const results = await routerRun(router, [[
+      '/ip/hotspot/user/print',
+      '=.proplist=name,password,profile,comment,uptime,bytes-in,bytes-out',
+    ]], 60000);
+    const rows = results[0]?.rows || [];
+    hotspotUserCache.set(key, { rows, expires: Date.now() + HOTSPOT_USER_TTL_MS });
+    return rows;
+  })();
+  hotspotUserCache.set(key, { promise: loadPromise, expires: 0 });
+  try {
+    return await loadPromise;
+  } catch (error) {
+    const current = hotspotUserCache.get(key);
+    if (current && current.promise === loadPromise) hotspotUserCache.delete(key);
+    throw error;
+  }
+}
+
 async function listHotspotUsersByComment(router, name) {
-  // Dump complet nécessaire pour NOM et PREFIXE-NOM. Budget long :
-  // un print de milliers d’users dépasse souvent 20 s (surtout via VPN).
-  const results = await routerRun(router, [[
-    '/ip/hotspot/user/print',
-    '=.proplist=name,password,profile,comment,uptime,bytes-in,bytes-out',
-  ]], 60000);
-  const rows = results[0]?.rows || [];
+  const rows = await listHotspotUsers(router);
   return rows.filter((row) => row.name && commentMatchesName(row.comment, name));
 }
 
@@ -1549,6 +1617,10 @@ async function listSaleScripts(router, options = {}) {
   if (!options.force && cached) {
     if (cached.entries && cached.expires > Date.now()) return cached.entries;
     if (cached.promise) return cached.promise;
+  }
+  if (!options.force) {
+    const persisted = readPersistedScriptList(cacheKey);
+    if (persisted) return persisted;
   }
   const loadPromise = (async () => {
     const queries = owners.length
@@ -1584,10 +1656,7 @@ async function listSaleScripts(router, options = {}) {
       || String(a.time || '').localeCompare(String(b.time || ''))
       || a.code.localeCompare(b.code)
     ));
-    scriptListCache.set(cacheKey, {
-      entries: parsed,
-      expires: Date.now() + SCRIPT_LIST_TTL_MS,
-    });
+    writePersistedScriptList(cacheKey, parsed);
     return parsed;
   })();
   scriptListCache.set(cacheKey, { promise: loadPromise, expires: 0 });
@@ -1713,6 +1782,14 @@ async function syncResellerAssignedFromRouter(reseller) {
   const resellerId = Number(reseller && reseller.id) || 0;
   const cached = assignedSyncCache.get(resellerId);
   if (cached && cached.expires > Date.now()) return cached.result || { added: 0 };
+  try {
+    const at = Number(sessionStorage.getItem(`opus.assignedSync.${resellerId}`) || 0);
+    if (at && Date.now() - at < ASSIGNED_SYNC_TTL_MS) {
+      const result = { added: 0 };
+      assignedSyncCache.set(resellerId, { result, expires: at + ASSIGNED_SYNC_TTL_MS });
+      return result;
+    }
+  } catch { /* navigation sans sessionStorage */ }
 
   const baseRouter = await getOne('routers', Number(reseller.router_id));
   if (!baseRouter) return { added: 0 };
@@ -1726,6 +1803,7 @@ async function syncResellerAssignedFromRouter(reseller) {
   );
   const mine = existing.filter((item) => Number(item.reseller_id) === Number(reseller.id));
   const knownComments = new Set(mine.map((item) => commentKey(item.comment)).filter(Boolean));
+  const knownIds = new Set(existing.map((item) => item.id));
   const empty = mine.length === 0;
   let added = 0;
 
@@ -1741,7 +1819,7 @@ async function syncResellerAssignedFromRouter(reseller) {
       const key = commentKey(row.comment);
       if (!empty && key && !knownComments.has(key)) continue;
       const id = `${baseRouter.id}:${row.name}`;
-      if (await getOne('assigned', id)) continue;
+      if (knownIds.has(id)) continue;
       await putOne('assigned', {
         id,
         router_id: baseRouter.id,
@@ -1752,12 +1830,15 @@ async function syncResellerAssignedFromRouter(reseller) {
         comment: row.comment || '',
         assigned_at: new Date().toISOString(),
       });
+      knownIds.add(id);
       added += 1;
       if (key) knownComments.add(key);
     }
   }
   const result = { added };
-  assignedSyncCache.set(resellerId, { result, expires: Date.now() + ASSIGNED_SYNC_TTL_MS });
+  const expires = Date.now() + ASSIGNED_SYNC_TTL_MS;
+  assignedSyncCache.set(resellerId, { result, expires });
+  try { sessionStorage.setItem(`opus.assignedSync.${resellerId}`, String(Date.now())); } catch { /* ignore */ }
   return result;
 }
 
@@ -2701,7 +2782,8 @@ async function handle(method, url, body) {
     }
   }
 
-  if (admin && path.startsWith('/api/admin') && method !== 'GET' && path !== '/api/admin/quota-trim' && path !== '/api/admin/password') {
+  const resellerDelete = method === 'DELETE' && /^\/api\/admin\/resellers\/\d+$/.test(path);
+  if (admin && path.startsWith('/api/admin') && method !== 'GET' && path !== '/api/admin/quota-trim' && path !== '/api/admin/password' && !resellerDelete) {
     if (await workspaceOverPlan()) {
       return fail(403, 'Choisissez les routeurs et les revendeurs à garder pour votre offre.');
     }
@@ -3091,6 +3173,37 @@ async function handle(method, url, body) {
     return ok({ reseller: await resellerView(current, currentMonthKey()) });
   }
 
+  if (resellerMatch && method === 'DELETE') {
+    const id = Number(resellerMatch[1]);
+    const current = await getOne('resellers', id);
+    if (!current) return fail(404, 'Revendeur introuvable.');
+    for (const sale of await getAll('sales')) {
+      if (Number(sale.reseller_id) !== id) continue;
+      let changed = false;
+      if ((sale.rate_percent == null || sale.rate_percent === '') && current.rate_percent != null) {
+        sale.rate_percent = current.rate_percent;
+        changed = true;
+      }
+      if (!sale.reseller_name && current.hmp_name) {
+        sale.reseller_name = current.hmp_name;
+        changed = true;
+      }
+      if (changed) await putOne('sales', sale);
+    }
+    for (const stock of await getAll('stock')) {
+      if (Number(stock.reseller_id) === id || String(stock.id).startsWith(`${id}:`)) {
+        await deleteOne('stock', stock.id);
+      }
+    }
+    for (const item of await getAll('assigned')) {
+      if (Number(item.reseller_id) === id) await deleteOne('assigned', item.id);
+    }
+    await deleteOne('resellers', id);
+    const session = readSession();
+    if (session && session.type === 'reseller' && Number(session.id) === id) writeSession(null);
+    return ok({ ok: true });
+  }
+
   if (method === 'GET' && path === '/api/admin/reach') {
     return ok({ mode: adminReachMode() });
   }
@@ -3397,7 +3510,7 @@ async function handle(method, url, body) {
     const reseller = await getOne('resellers', resellerSession.id);
     if (!reseller || reseller.active !== 1) return fail(403, 'Compte désactivé.');
     try {
-      await syncResellerAssignedFromRouter(reseller);
+      if (query.get('sync') !== '0') await syncResellerAssignedFromRouter(reseller);
     } catch {
       // Vente possible avec le stock local / lots déjà importés.
     }
@@ -3478,12 +3591,15 @@ async function handle(method, url, body) {
     const range = reportWindow(query, resellerSession.id);
     if (!range) return fail(400, 'La période est invalide.');
     const purged = await purgeNonScriptSales();
-    const sync = await syncHapSales({
-      resellerId: resellerSession.id,
-      from: range.monthFrom,
-      to: range.today,
-      force: query.get('force') === '1',
-    });
+    const skipSync = query.get('sync') === '0';
+    const sync = skipSync
+      ? { warning: '', created: 0, removed: 0, read: 0 }
+      : await syncHapSales({
+        resellerId: resellerSession.id,
+        from: range.monthFrom,
+        to: range.today,
+        force: query.get('force') === '1',
+      });
     const rows = await reportRows(range);
     const resellers = await getAll('resellers');
     const routers = await getAll('routers');

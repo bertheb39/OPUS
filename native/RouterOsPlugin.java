@@ -298,7 +298,7 @@ public class RouterOsPlugin extends Plugin {
                 call.reject("Impossible de partager le QR.");
                 return;
             }
-            String safeName = (name == null || name.isEmpty()) ? "ticket-qr.png" : name.replaceAll("[^A-Za-z0-9._-]", "_");
+            String safeName = (name == null || name.isEmpty()) ? "ticket-qr.png" : name.replaceAll("[\\\\/:*?\"<>|]", "_");
             File file = new File(dir, safeName);
             try (FileOutputStream out = new FileOutputStream(file)) {
                 out.write(bytes);
@@ -313,6 +313,43 @@ public class RouterOsPlugin extends Plugin {
             call.resolve();
         } catch (Exception error) {
             call.reject("Impossible de partager le QR.");
+        }
+    }
+
+    @PluginMethod
+    public void shareFile(PluginCall call) {
+        String base64 = call.getString("base64", "");
+        String name = call.getString("name", "rapport.pdf");
+        String mime = call.getString("mime", "application/pdf");
+        if (base64 == null || base64.isEmpty() || getActivity() == null || getContext() == null) {
+            call.reject("Impossible d'enregistrer le PDF.");
+            return;
+        }
+        try {
+            String raw = base64;
+            int comma = raw.indexOf(',');
+            if (raw.startsWith("data:") && comma >= 0) raw = raw.substring(comma + 1);
+            byte[] bytes = android.util.Base64.decode(raw, android.util.Base64.DEFAULT);
+            File dir = new File(getContext().getCacheDir(), "share");
+            if (!dir.exists() && !dir.mkdirs()) {
+                call.reject("Impossible d'enregistrer le PDF.");
+                return;
+            }
+            String safeName = (name == null || name.isEmpty()) ? "rapport.pdf" : name.replaceAll("[\\\\/:*?\"<>|]", "_");
+            File file = new File(dir, safeName);
+            try (FileOutputStream out = new FileOutputStream(file)) {
+                out.write(bytes);
+            }
+            Uri uri = FileProvider.getUriForFile(getContext(), getContext().getPackageName() + ".fileprovider", file);
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType(mime == null || mime.isEmpty() ? "application/pdf" : mime);
+            send.putExtra(Intent.EXTRA_STREAM, uri);
+            send.putExtra(Intent.EXTRA_SUBJECT, safeName);
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            getActivity().startActivity(Intent.createChooser(send, "Enregistrer le PDF"));
+            call.resolve();
+        } catch (Exception error) {
+            call.reject("Impossible d'enregistrer le PDF.");
         }
     }
 

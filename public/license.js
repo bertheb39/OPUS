@@ -172,17 +172,20 @@ async function publishWorkspaceStatus(record) {
   if (!firebaseLicenseReady() || !record?.code) return;
   const id = record.workspaceId || localStorage.getItem(workspaceIdKey);
   if (!id) return;
-  const body = JSON.stringify({
-    fields: {
-      code: { stringValue: record.code },
-      clientName: { stringValue: record.clientName || '' },
-      plan: { stringValue: record.plan || '' },
-      status: { stringValue: record.status || '' },
-      endsAt: { stringValue: record.endsAt || '' },
-    },
-  });
+  const fields = {
+    code: { stringValue: record.code },
+    clientName: { stringValue: record.clientName || '' },
+    phone: { stringValue: record.phone || '' },
+    plan: { stringValue: record.plan || '' },
+    status: { stringValue: record.status || '' },
+    endsAt: { stringValue: record.endsAt || '' },
+    deviceId: { stringValue: record.deviceId || '' },
+    seenAt: { stringValue: new Date().toISOString() },
+  };
+  const mask = Object.keys(fields).map((key) => `updateMask.fieldPaths=${key}`).join('&');
+  const body = JSON.stringify({ fields });
   const patched = await firestoreRequest(
-    `${workspaceStatusUrl(id)}&updateMask.fieldPaths=code&updateMask.fieldPaths=clientName&updateMask.fieldPaths=plan&updateMask.fieldPaths=status&updateMask.fieldPaths=endsAt`,
+    `${workspaceStatusUrl(id)}&${mask}`,
     { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body },
   );
   if (patched.ok || patched.status !== 404) return;
@@ -298,6 +301,7 @@ function parseLicenseDoc(doc) {
     startsAt: firestoreString(fields, 'startsAt'),
     endsAt: firestoreString(fields, 'endsAt'),
     deviceId: firestoreString(fields, 'deviceId'),
+    removed: firestoreString(fields, 'removed'),
   };
 }
 
@@ -1096,7 +1100,7 @@ function clearPublicContactCache() {
 
 async function loadPublicContact() {
   if (publicContactCache) return publicContactCache;
-  const empty = { payments: [], contactPhone: '', contactWhatsapp: '' };
+  const empty = { payments: [], contactPhone: '', contactWhatsapp: '', tutorialUrl: '' };
   try {
     const project = encodeURIComponent(FIREBASE_PROJECT_ID);
     const key = encodeURIComponent(FIREBASE_API_KEY);
@@ -1110,6 +1114,7 @@ async function loadPublicContact() {
       payments: parsePaymentMethods(firestoreString(fields, 'payments')),
       contactPhone: firestoreString(fields, 'contactPhone').trim(),
       contactWhatsapp: firestoreString(fields, 'contactWhatsapp').trim(),
+      tutorialUrl: firestoreString(fields, 'tutorialUrl').trim(),
     };
     return publicContactCache;
   } catch {
@@ -1765,6 +1770,7 @@ async function refreshLicenseOrGrace() {
     return false;
   } catch (error) {
     if (cache.plan === 'essai' && licenseAllows(cache)) {
+      publishWorkspaceLicense(cache);
       clearLicenseGate();
       return false;
     }
@@ -1853,14 +1859,14 @@ async function hydrateWorkspaceLicense() {
   const workspaceId = workspaceLicenseRecord()?.workspaceId || localStorage.getItem(workspaceIdKey) || '';
   if (workspaceId && firebaseLicenseReady()) {
     try {
-      const response = await firestoreRequest(workspaceStatusUrl(workspaceId));
+      const response = await firestoreRequest(workspaceStatusUrl(workspaceId), { timeoutMs: 4000 });
       if (response.ok) {
         const fields = (await response.json()).fields || {};
         const live = {
           code: firestoreString(fields, 'code'),
           clientName: firestoreString(fields, 'clientName'),
           plan: firestoreString(fields, 'plan'),
-          status: firestoreString(fields, 'status'),
+          status: firestoreString(fields, 'removed') === '1' ? 'revoked' : firestoreString(fields, 'status'),
           endsAt: firestoreString(fields, 'endsAt'),
           workspaceId,
           quotaKeep: fields.quotaKeep
