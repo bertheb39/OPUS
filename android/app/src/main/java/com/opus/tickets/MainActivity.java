@@ -17,7 +17,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     @Override
-    protected void onSaveInstanceState(Bundle outState) {
+    public void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
         // Le code d'invitation est très long. Le garder dans l'état Android
         // ferme l'application au retour de WhatsApp.
