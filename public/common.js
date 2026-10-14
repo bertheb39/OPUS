@@ -606,19 +606,33 @@ async function sharePlainTexts(messages, title = 'Partager') {
 
 async function copyPlainText(text) {
   const payload = String(text || '');
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    await navigator.clipboard.writeText(payload);
+  if (!payload) throw new Error('Rien à copier.');
+  const plugin = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.RouterOs;
+  if (plugin && plugin.copyText) {
+    await plugin.copyText({ text: payload });
     return;
+  }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(payload);
+      return;
+    }
+  } catch {
+    // Le presse-papiers du navigateur refuse souvent un long code OPUS1.
   }
   const area = document.createElement('textarea');
   area.value = payload;
   area.setAttribute('readonly', '');
   area.style.position = 'fixed';
+  area.style.left = '0';
+  area.style.top = '0';
   area.style.opacity = '0';
   document.body.appendChild(area);
+  area.focus();
   area.select();
-  document.execCommand('copy');
+  const copied = document.execCommand('copy');
   area.remove();
+  if (!copied) throw new Error('Copie impossible.');
 }
 
 async function showResellerInvite(invite) {
@@ -646,7 +660,7 @@ async function showResellerInvite(invite) {
       <label>Message 1 — Guide</label>
       <textarea class="invite-share" readonly rows="8">${esc(guideText)}</textarea>
       <label>Message 2 — Code (OPUS1 seul)</label>
-      <textarea class="invite-share invite-code" readonly rows="3">${esc(token)}</textarea>
+      <p class="meta">Code prêt, ${token.length.toLocaleString('fr-FR')} caractères. Il commence par ${esc(token.slice(0, 12))}… Copiez-le ou partagez-le : il part en entier.</p>
       <div class="modal-actions">
         <button type="button" class="btn-sell" data-share-both>Partager les 2 messages</button>
         <button type="button" class="btn-quiet" data-share-guide>Partager le guide</button>

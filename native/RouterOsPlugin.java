@@ -1,10 +1,13 @@
 package com.opus.tickets;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
-import androidx.activity.result.ActivityResult;
-import com.getcapacitor.annotation.ActivityCallback;
+import android.os.Handler;
+import android.os.Looper;
 import android.webkit.CookieManager;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
@@ -37,6 +40,7 @@ public class RouterOsPlugin extends Plugin {
     private JSArray pendingShareMessages;
     private int pendingShareIndex;
     private PluginCall pendingShareCall;
+    private boolean awaitingShareReturn;
 
     @PluginMethod
     public void run(PluginCall call) {
@@ -201,6 +205,26 @@ public class RouterOsPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void copyText(PluginCall call) {
+        String text = call.getString("text", "");
+        if (text == null || text.isEmpty() || getContext() == null) {
+            call.reject("Copie impossible.");
+            return;
+        }
+        try {
+            ClipboardManager clipboard = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+            if (clipboard == null) {
+                call.reject("Copie impossible.");
+                return;
+            }
+            clipboard.setPrimaryClip(ClipData.newPlainText("Tickets", text));
+            call.resolve();
+        } catch (Exception error) {
+            call.reject("Copie impossible.");
+        }
+    }
+
+    @PluginMethod
     public void shareText(PluginCall call) {
         String text = call.getString("text", "");
         String title = call.getString("title", "Partager");
@@ -208,25 +232,13 @@ public class RouterOsPlugin extends Plugin {
             call.reject("Impossible de partager.");
             return;
         }
+        cancelPendingShare();
         try {
-            Intent send = new Intent(Intent.ACTION_SEND);
-            send.setType("text/plain");
-            send.putExtra(Intent.EXTRA_TEXT, text);
-            if (title != null && !title.isEmpty()) send.putExtra(Intent.EXTRA_SUBJECT, title);
-            startActivityForResult(
-                call,
-                Intent.createChooser(send, title == null || title.isEmpty() ? "Partager" : title),
-                "shareTextFinished"
-            );
+            openShareChooser(text, title);
+            call.resolve();
         } catch (Exception error) {
             call.reject("Impossible de partager.");
         }
-    }
-
-    @ActivityCallback
-    private void shareTextFinished(PluginCall call, ActivityResult result) {
-        if (call == null) return;
-        call.resolve();
     }
 
     @PluginMethod
@@ -236,47 +248,80 @@ public class RouterOsPlugin extends Plugin {
             call.reject("Impossible de partager.");
             return;
         }
+        cancelPendingShare();
         pendingShareMessages = messages;
         pendingShareIndex = 0;
         pendingShareCall = call;
-        shareNextText();
+        call.setKeepAlive(true);
+        ShareStep step = openNextShare();
+        if (step == ShareStep.DONE) finishPendingShare(true);
+        else if (step == ShareStep.FAILED) finishPendingShare(false);
     }
 
-    private void shareNextText() {
-        PluginCall call = pendingShareCall;
+    @Override
+    protected void handleOnResume() {
+        if (!awaitingShareReturn) return;
+        awaitingShareReturn = false;
+        pendingShareIndex += 1;
+        new Handler(Looper.getMainLooper()).post(() -> {
+            ShareStep step = openNextShare();
+            if (step == ShareStep.DONE) finishPendingShare(true);
+            else if (step == ShareStep.FAILED) finishPendingShare(false);
+        });
+    }
+
+    private enum ShareStep { LAUNCHED, DONE, FAILED }
+
+    private ShareStep openNextShare() {
         JSArray messages = pendingShareMessages;
-        if (call == null || messages == null) return;
+        if (pendingShareCall == null || messages == null || getActivity() == null) return ShareStep.FAILED;
         try {
-            if (pendingShareIndex >= messages.length()) {
-                pendingShareMessages = null;
-                pendingShareCall = null;
-                call.resolve();
-                return;
-            }
-            Object raw = messages.get(pendingShareIndex);
-            String text = raw == null ? "" : String.valueOf(raw);
-            if (text.isEmpty()) {
+            while (pendingShareIndex < messages.length()) {
+                Object raw = messages.get(pendingShareIndex);
+                String text = raw == null ? "" : String.valueOf(raw);
+                if (!text.isEmpty()) {
+                    awaitingShareReturn = true;
+                    openShareChooser(text, "Partager");
+                    return ShareStep.LAUNCHED;
+                }
                 pendingShareIndex += 1;
-                shareNextText();
-                return;
             }
-            Intent send = new Intent(Intent.ACTION_SEND);
-            send.setType("text/plain");
-            send.putExtra(Intent.EXTRA_TEXT, text);
-            startActivityForResult(call, Intent.createChooser(send, "Partager"), "shareTextsFinished");
+            return ShareStep.DONE;
         } catch (Exception error) {
-            pendingShareMessages = null;
-            pendingShareCall = null;
-            call.reject("Impossible de partager.");
+            return ShareStep.FAILED;
         }
     }
 
-    @ActivityCallback
-    private void shareTextsFinished(PluginCall call, ActivityResult result) {
-        if (call == null && pendingShareCall == null) return;
-        if (call != null) pendingShareCall = call;
-        pendingShareIndex += 1;
-        shareNextText();
+    private void openShareChooser(String text, String title) {
+        Intent send = new Intent(Intent.ACTION_SEND);
+        send.setType("text/plain");
+        send.putExtra(Intent.EXTRA_TEXT, text);
+        if (title != null && !title.isEmpty()) send.putExtra(Intent.EXTRA_SUBJECT, title);
+        String label = (title == null || title.isEmpty()) ? "Partager" : title;
+        getActivity().startActivity(Intent.createChooser(send, label));
+    }
+
+    private void cancelPendingShare() {
+        awaitingShareReturn = false;
+        PluginCall previous = pendingShareCall;
+        pendingShareMessages = null;
+        pendingShareCall = null;
+        pendingShareIndex = 0;
+        if (previous == null) return;
+        previous.reject("Partage interrompu.");
+        if (getBridge() != null) getBridge().releaseCall(previous);
+    }
+
+    private void finishPendingShare(boolean ok) {
+        awaitingShareReturn = false;
+        PluginCall call = pendingShareCall;
+        pendingShareMessages = null;
+        pendingShareCall = null;
+        pendingShareIndex = 0;
+        if (call == null) return;
+        if (ok) call.resolve();
+        else call.reject("Impossible de partager.");
+        if (getBridge() != null) getBridge().releaseCall(call);
     }
 
     @PluginMethod
