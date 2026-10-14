@@ -1091,6 +1091,11 @@ async function buildResellerInvite(resellerId) {
   };
 
   const token = await encodeInviteToken(pack);
+  try {
+    await enqueueAssignmentPublish(reseller.id);
+  } catch {
+    // Le fichier reste la copie du moment. La liste sur le routeur partira au prochain enregistrement.
+  }
   const guideText = [
     `Tickets — invitation pour ${reseller.hmp_name}`,
     '',
@@ -1580,11 +1585,13 @@ function hotspotUserCacheKey(router) {
   return `${Number(router && router.id) || 0}|${host}|${Number(router && router.port) || 0}`;
 }
 
-async function listHotspotUsers(router) {
+async function listHotspotUsers(router, options = {}) {
   const key = hotspotUserCacheKey(router);
-  const cached = hotspotUserCache.get(key);
-  if (cached && cached.rows && cached.expires > Date.now()) return cached.rows;
-  if (cached && cached.promise) return cached.promise;
+  if (!options.force) {
+    const cached = hotspotUserCache.get(key);
+    if (cached && cached.rows && cached.expires > Date.now()) return cached.rows;
+    if (cached && cached.promise) return cached.promise;
+  }
   const loadPromise = (async () => {
     // Dump complet nécessaire pour NOM et PREFIXE-NOM. Budget long :
     // un print de milliers d’users dépasse souvent 20 s (surtout via VPN).
@@ -1773,30 +1780,272 @@ function ticketConsumed(row) {
   return /[1-9]/.test(uptime);
 }
 
+const ASSIGN_SCRIPT_MARK = '#OPUS-LOTS';
+const ASSIGN_CHUNK_CHARS = 2800;
+const manifestPublishAt = new Map();
+const manifestPublishQueue = new Map();
+
+function assignScriptBase(resellerId) {
+  return `opus-lots-${Number(resellerId) || 0}`;
+}
+
+function assignmentStamp(keys, names) {
+  const text = `${keys.join('\n')}|${names.join('\n')}`;
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function chunkAssignmentKeys(keys) {
+  const chunks = [];
+  let current = [];
+  let size = 48;
+  keys.forEach((key) => {
+    const line = key.length + 2;
+    if (current.length && size + line > ASSIGN_CHUNK_CHARS) {
+      chunks.push(current);
+      current = [];
+      size = 48;
+    }
+    current.push(key);
+    size += line;
+  });
+  chunks.push(current);
+  return chunks;
+}
+
+function assignmentSource(keys, part, total, stamp) {
+  const lines = [`${ASSIGN_SCRIPT_MARK} ${part}/${total} s=${stamp}`];
+  keys.forEach((key) => lines.push(`#${key}`));
+  return lines.join('\n');
+}
+
+function parseAssignmentSource(source) {
+  const lines = String(source || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const header = lines.find((line) => line.startsWith(ASSIGN_SCRIPT_MARK));
+  if (!header) return null;
+  const match = header.match(/^#OPUS-LOTS\s+(\d+)\s*\/\s*(\d+)\s+s=([0-9a-f]+)\s*$/i);
+  if (!match) return null;
+  const keys = [];
+  lines.forEach((line) => {
+    if (!line.startsWith('#') || line.startsWith(ASSIGN_SCRIPT_MARK)) return;
+    const key = line.slice(1).trim();
+    if (key) keys.push(key);
+  });
+  return {
+    part: Number(match[1]),
+    total: Number(match[2]),
+    stamp: match[3].toLowerCase(),
+    keys,
+  };
+}
+
+function assignScriptPrint(name) {
+  return [
+    '/system/script/print',
+    `?name=${name}`,
+    '=.proplist=.id,name,source',
+  ];
+}
+
+async function readAssignmentManifest(router, resellerId) {
+  const base = assignScriptBase(resellerId);
+  const first = await routerRun(router, [assignScriptPrint(base)], 12000);
+  const row = (first[0]?.rows || [])[0];
+  const parsed = row ? parseAssignmentSource(row.source) : null;
+  if (!parsed) return null;
+  const keys = [...parsed.keys];
+  const total = Math.min(Math.max(parsed.total || 1, 1), 40);
+  if (total > 1) {
+    const commands = [];
+    for (let part = 2; part <= total; part += 1) commands.push(assignScriptPrint(`${base}-${part}`));
+    const rest = await routerRun(router, commands, 20000);
+    (rest || []).forEach((result) => {
+      const extra = parseAssignmentSource((result?.rows || [])[0]?.source);
+      if (extra) keys.push(...extra.keys);
+    });
+  }
+  return {
+    stamp: parsed.stamp,
+    keys: [...new Set(keys)],
+  };
+}
+
+async function writeAssignmentManifest(router, resellerId, keys, stamp) {
+  const chunks = chunkAssignmentKeys(keys);
+  const total = chunks.length;
+  const base = assignScriptBase(resellerId);
+  const current = await routerRun(router, [assignScriptPrint(base)], 12000);
+  const previous = parseAssignmentSource((current[0]?.rows || [])[0]?.source);
+  const probeCount = Math.min(Math.max(total, previous ? previous.total : 1), 40);
+  const names = [];
+  for (let part = 1; part <= probeCount; part += 1) {
+    names.push(part === 1 ? base : `${base}-${part}`);
+  }
+  const listed = await routerRun(router, names.map((name) => assignScriptPrint(name)), 20000);
+  const found = new Map();
+  (listed || []).forEach((result, index) => {
+    const row = (result?.rows || [])[0];
+    if (row && row['.id']) found.set(names[index], row['.id']);
+  });
+  const commands = [];
+  for (let part = 1; part <= total; part += 1) {
+    const name = names[part - 1];
+    const source = assignmentSource(chunks[part - 1], part, total, stamp);
+    const id = found.get(name);
+    if (id) {
+      commands.push(['/system/script/set', `=.id=${id}`, `=source=${source}`, '=comment=OPUS attributions']);
+    } else {
+      commands.push(['/system/script/add', `=name=${name}`, `=source=${source}`, '=comment=OPUS attributions']);
+    }
+  }
+  for (let part = total + 1; part <= probeCount; part += 1) {
+    const id = found.get(names[part - 1]);
+    if (id) commands.push(['/system/script/remove', `=.id=${id}`]);
+  }
+  if (commands.length) await routerRun(router, commands, 20000);
+}
+
+async function publishResellerAssignmentManifest(resellerId) {
+  const id = Number(resellerId) || 0;
+  const reseller = await getOne('resellers', id);
+  if (!reseller) return false;
+  const router = await getOne('routers', Number(reseller.router_id));
+  if (!router || !router.host) return false;
+  const rows = (await getAll('assigned')).filter((item) => Number(item.reseller_id) === id);
+  const keys = [...new Set(rows.map((item) => commentKey(item.comment)).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'fr'));
+  const names = rows.map((item) => String(item.name || '').trim()).filter(Boolean)
+    .sort((a, b) => a.localeCompare(b, 'fr'));
+  await writeAssignmentManifest(router, id, keys, assignmentStamp(keys, names));
+  return true;
+}
+
+function enqueueAssignmentPublish(resellerId) {
+  const id = Number(resellerId) || 0;
+  const previous = manifestPublishQueue.get(id) || Promise.resolve();
+  const job = previous.catch(() => {}).then(() => publishResellerAssignmentManifest(id));
+  manifestPublishQueue.set(id, job);
+  job.finally(() => {
+    if (manifestPublishQueue.get(id) === job) manifestPublishQueue.delete(id);
+  });
+  return job;
+}
+
+function scheduleAssignmentPublish(resellers) {
+  const now = Date.now();
+  (Array.isArray(resellers) ? resellers : []).forEach((reseller) => {
+    const id = Number(reseller && reseller.id) || 0;
+    if (!id) return;
+    const at = manifestPublishAt.get(id) || 0;
+    if (now - at < 180000) return;
+    manifestPublishAt.set(id, now);
+    enqueueAssignmentPublish(id).catch(() => {
+      manifestPublishAt.delete(id);
+    });
+  });
+}
+
+function rememberAssignmentStamp(resellerId, stamp) {
+  try { sessionStorage.setItem(`opus.assignStamp.${resellerId}`, stamp); } catch { /* navigation privée */ }
+}
+
+function readAssignmentStamp(resellerId) {
+  try { return sessionStorage.getItem(`opus.assignStamp.${resellerId}`) || ''; } catch { return ''; }
+}
+
+async function applyAssignmentManifest(reseller, router, baseRouter, keys) {
+  const wanted = new Set(keys);
+  const resellerId = Number(reseller.id);
+  const [sales, existing] = await Promise.all([getAll('sales'), getAll('assigned')]);
+  const sold = new Set(
+    sales.filter((sale) => Number(sale.router_id) === Number(baseRouter.id)).map((sale) => sale.code),
+  );
+  const mine = existing.filter((item) => Number(item.reseller_id) === resellerId);
+  const kept = (item) => item.handed_at || item.channel === 'AP';
+  let removed = 0;
+  const drop = async (item) => {
+    await deleteOne('assigned', item.id);
+    removed += 1;
+  };
+  if (!wanted.size) {
+    for (const item of mine) {
+      if (!kept(item)) await drop(item);
+    }
+    return { added: 0, removed };
+  }
+  const rows = await listHotspotUsers(router, { force: true });
+  const knownIds = new Set(mine.map((item) => item.id));
+  let added = 0;
+  for (const row of rows) {
+    if (!row.name || sold.has(row.name) || ticketConsumed(row)) continue;
+    if (!wanted.has(commentKey(row.comment))) continue;
+    const id = `${baseRouter.id}:${row.name}`;
+    if (knownIds.has(id)) continue;
+    await putOne('assigned', {
+      id,
+      router_id: baseRouter.id,
+      reseller_id: reseller.id,
+      name: row.name,
+      password: row.password || row.name,
+      profile: row.profile || '',
+      comment: row.comment || '',
+      assigned_at: new Date().toISOString(),
+    });
+    knownIds.add(id);
+    added += 1;
+  }
+  const liveNames = new Set(rows.map((row) => row.name).filter(Boolean));
+  for (const item of mine) {
+    if (kept(item)) continue;
+    if (!wanted.has(commentKey(item.comment)) || !liveNames.has(item.name)) await drop(item);
+  }
+  return { added, removed };
+}
+
 /**
- * Récupère les lots depuis le routeur vers IndexedDB du téléphone revendeur.
- * - Si aucun lot local : importe les tickets non consommés du nom/mots-clés (répare invitation vide).
- * - Sinon : ajoute les nouveaux tickets des mêmes commentaires déjà attribués.
+ * Aligne les lots du téléphone sur la liste écrite par l’admin sur le routeur.
+ * Sans cette liste (ancienne app), on garde l’ancien rattrapage par nom.
  */
-async function syncResellerAssignedFromRouter(reseller) {
-  if (licenseOpsFrozen()) return { added: 0 };
+async function syncResellerAssignedFromRouter(reseller, options = {}) {
+  if (licenseOpsFrozen()) return { added: 0, removed: 0 };
   const resellerId = Number(reseller && reseller.id) || 0;
   const cached = assignedSyncCache.get(resellerId);
-  if (cached && cached.expires > Date.now()) return cached.result || { added: 0 };
+  if (cached && cached.promise) return cached.promise;
+  if (!options.fresh && cached && cached.expires > Date.now()) return cached.result || { added: 0, removed: 0 };
+  const job = syncResellerAssignedNow(reseller);
+  assignedSyncCache.set(resellerId, { promise: job, expires: 0 });
   try {
-    const at = Number(sessionStorage.getItem(`opus.assignedSync.${resellerId}`) || 0);
-    if (at && Date.now() - at < ASSIGNED_SYNC_TTL_MS) {
-      const result = { added: 0 };
-      assignedSyncCache.set(resellerId, { result, expires: at + ASSIGNED_SYNC_TTL_MS });
+    const result = await job;
+    assignedSyncCache.set(resellerId, { result, expires: Date.now() + ASSIGNED_SYNC_TTL_MS });
+    return result;
+  } catch (error) {
+    if (assignedSyncCache.get(resellerId)?.promise === job) assignedSyncCache.delete(resellerId);
+    throw error;
+  }
+}
+
+async function syncResellerAssignedNow(reseller) {
+  const resellerId = Number(reseller && reseller.id) || 0;
+  const baseRouter = await getOne('routers', Number(reseller.router_id));
+  if (!baseRouter) return { added: 0, removed: 0 };
+  const router = routerForReseller(baseRouter, reseller) || baseRouter;
+  try {
+    const manifest = await readAssignmentManifest(router, resellerId);
+    if (manifest) {
+      if (readAssignmentStamp(resellerId) === manifest.stamp) return { added: 0, removed: 0 };
+      const result = await applyAssignmentManifest(reseller, router, baseRouter, manifest.keys);
+      rememberAssignmentStamp(resellerId, manifest.stamp);
       return result;
     }
-  } catch { /* navigation sans sessionStorage */ }
-
-  const baseRouter = await getOne('routers', Number(reseller.router_id));
-  if (!baseRouter) return { added: 0 };
-  const router = routerForReseller(baseRouter, reseller) || baseRouter;
+  } catch {
+    // Liste absente ou routeur occupé : on tente l’ancien rattrapage.
+  }
   const labels = resellerSaleLabels(reseller);
-  if (!labels.length) return { added: 0 };
+  if (!labels.length) return { added: 0, removed: 0 };
 
   const [sales, existing] = await Promise.all([getAll('sales'), getAll('assigned')]);
   const sold = new Set(
@@ -1836,11 +2085,7 @@ async function syncResellerAssignedFromRouter(reseller) {
       if (key) knownComments.add(key);
     }
   }
-  const result = { added };
-  const expires = Date.now() + ASSIGNED_SYNC_TTL_MS;
-  assignedSyncCache.set(resellerId, { result, expires });
-  try { sessionStorage.setItem(`opus.assignedSync.${resellerId}`, String(Date.now())); } catch { /* ignore */ }
-  return result;
+  return { added, removed: 0 };
 }
 
 async function readTicketUsage(router, codes) {
@@ -3045,6 +3290,7 @@ async function handle(method, url, body) {
     };
     const views = [];
     for (const reseller of resellers) views.push(await resellerView(reseller, month, bundle));
+    scheduleAssignmentPublish(resellers);
     return ok({ month, resellers: views });
   }
 
@@ -3327,7 +3573,13 @@ async function handle(method, url, body) {
       count += 1;
     }
     if (!count) return fail(400, 'Aucun ticket à attribuer pour ces commentaires.');
-    return ok({ count });
+    let published = true;
+    try {
+      published = await enqueueAssignmentPublish(reseller.id);
+    } catch {
+      published = false;
+    }
+    return ok({ count, published });
   }
 
   if (method === 'POST' && path === '/api/admin/lots/retrait') {
@@ -3341,7 +3593,13 @@ async function handle(method, url, body) {
     ));
     for (const row of rows) await deleteOne('assigned', row.id);
     if (!rows.length) return fail(400, 'Ces commentaires ne sont plus attribués.');
-    return ok({ count: rows.length });
+    let published = true;
+    try {
+      published = await enqueueAssignmentPublish(reseller.id);
+    } catch {
+      published = false;
+    }
+    return ok({ count: rows.length, published });
   }
 
   if (method === 'POST' && path === '/api/admin/stock') {
@@ -3511,7 +3769,9 @@ async function handle(method, url, body) {
     const reseller = await getOne('resellers', resellerSession.id);
     if (!reseller || reseller.active !== 1) return fail(403, 'Compte désactivé.');
     try {
-      if (query.get('sync') !== '0') await syncResellerAssignedFromRouter(reseller);
+      if (query.get('sync') !== '0') {
+        await syncResellerAssignedFromRouter(reseller, { fresh: query.get('fresh') === '1' });
+      }
     } catch {
       // Vente possible avec le stock local / lots déjà importés.
     }

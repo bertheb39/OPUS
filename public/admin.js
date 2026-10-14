@@ -1329,7 +1329,11 @@ app.addEventListener('submit', async (event) => {
         },
       });
       state.lot = null;
-      await refresh(`${result.count} ticket${result.count > 1 ? 's' : ''} attribué${result.count > 1 ? 's' : ''}.`, { fromSubmit: true });
+      const assignedWord = `attribué${result.count > 1 ? 's' : ''}`;
+      const assignedNote = result.published === false
+        ? ' Le routeur n’a pas pris la liste : le téléphone se mettra à jour dès qu’il répond.'
+        : '';
+      await refresh(`${result.count} ticket${result.count > 1 ? 's' : ''} ${assignedWord}.${assignedNote}`, { fromSubmit: true });
       return;
     }
     if (form.dataset.form === 'lot-remove') {
@@ -1350,7 +1354,11 @@ app.addEventListener('submit', async (event) => {
         body: { resellerId: Number(form.dataset.reseller), comments },
       });
       state.lot = null;
-      await refresh(`${result.count} ticket${result.count > 1 ? 's' : ''} retiré${result.count > 1 ? 's' : ''}.`, { fromSubmit: true });
+      const removedWord = `retiré${result.count > 1 ? 's' : ''}`;
+      const removedNote = result.published === false
+        ? ' Le routeur n’a pas pris la liste : le téléphone se mettra à jour dès qu’il répond.'
+        : '';
+      await refresh(`${result.count} ticket${result.count > 1 ? 's' : ''} ${removedWord}.${removedNote}`, { fromSubmit: true });
       return;
     }
     if (form.dataset.form === 'stock') {

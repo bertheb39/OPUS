@@ -384,6 +384,7 @@ async function loadForfaits(options = {}) {
   const localOnly = options.sync === false;
   const params = new URLSearchParams();
   if (localOnly) params.set('sync', '0');
+  if (options.fresh) params.set('fresh', '1');
   const data = await api(`/api/vendeur/forfaits${params.toString() ? `?${params}` : ''}`);
   if (stamp && stamp !== forfaitStamp) return;
   if (localOnly && loadForfaits.liveStamp === stamp) return;
@@ -399,10 +400,10 @@ function refreshForfaitsSoon() {
   }).catch(() => {});
 }
 
-function refreshForfaitsFromRouter() {
+function refreshForfaitsFromRouter(options = {}) {
   const stamp = ++forfaitStamp;
   state.routerSync = true;
-  loadForfaits({ stamp }).then(() => {
+  loadForfaits({ stamp, fresh: Boolean(options.fresh) }).then(() => {
     if (stamp !== forfaitStamp) return;
     state.routerSync = false;
     if (state.authed && state.screen === 'list' && !state.ticket && !state.busy) render();
@@ -573,7 +574,7 @@ app.addEventListener('submit', async (event) => {
     state.screen = 'list';
     markActivity();
     idleLogout.done = false;
-    refreshForfaitsFromRouter();
+    refreshForfaitsFromRouter({ fresh: true });
   } catch (error) {
     showToast(error.message, 'err');
   } finally {
@@ -835,8 +836,14 @@ async function boot() {
   }
   render({ resetScroll: true });
   if (state.authed && state.me && !(typeof resellerDroppedByPlan === 'function' && resellerDroppedByPlan(state.me.id))) {
-    refreshForfaitsFromRouter();
+    refreshForfaitsFromRouter({ fresh: true });
   }
 }
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (!state.authed || state.busy || state.screen !== 'list' || state.ticket) return;
+  refreshForfaitsFromRouter({ fresh: true });
+});
 
 boot();
