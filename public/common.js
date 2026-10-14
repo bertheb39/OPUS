@@ -233,7 +233,7 @@ function showToast(message, kind = 'ok', durationMs = 2200) {
   }, durationMs);
 }
 
-function showConfirm({ title, text, confirmLabel = 'Confirmer', danger = false, passwordPrompt = '' }) {
+function showConfirm({ title, text, confirmLabel = 'Confirmer', danger = false, passwordPrompt = '', hideCancel = false }) {
   return new Promise((resolve) => {
     const askPassword = Boolean(passwordPrompt);
     const overlay = document.createElement('div');
@@ -249,7 +249,7 @@ function showConfirm({ title, text, confirmLabel = 'Confirmer', danger = false, 
             : `<input id="confirm-factory-password" name="factoryPassword" type="password" autocomplete="current-password" required>`}
         ` : ''}
         <div class="modal-actions">
-          <button type="button" class="btn-quiet" data-cancel>Annuler</button>
+          ${hideCancel ? '' : '<button type="button" class="btn-quiet" data-cancel>Annuler</button>'}
           <button type="button" class="${danger ? 'btn-danger' : 'btn-sell'}" data-ok>${esc(confirmLabel)}</button>
         </div>
       </section>
@@ -258,7 +258,7 @@ function showConfirm({ title, text, confirmLabel = 'Confirmer', danger = false, 
       overlay.remove();
       resolve(value);
     };
-    overlay.querySelector('[data-cancel]').addEventListener('click', () => close(askPassword ? null : false));
+    overlay.querySelector('[data-cancel]')?.addEventListener('click', () => close(askPassword ? null : false));
     overlay.querySelector('[data-ok]').addEventListener('click', () => {
       if (!askPassword) {
         close(true);
@@ -676,12 +676,11 @@ async function showResellerInvite(invite) {
   overlay.innerHTML = `
     <section class="modal modal-form" role="dialog" aria-modal="true">
       <h2>Inviter ${esc(name)}</h2>
-      <p>Un seul fichier à envoyer dans le chat. Le revendeur l’ouvre dans Tickets avec « Rejoindre avec un code », puis « Ouvrir le fichier reçu ».</p>
       ${summary ? `<p class="meta">${esc(summary)}</p>` : ''}
       ${meta && lots === 0 && stockTotal === 0 ? '<p class="meta">Aucun lot ni stock dans ce code : attribuez d’abord des lots (ou ajoutez du stock), puis renvoyez l’invitation.</p>' : ''}
       <p class="meta">Fichier ${esc(fileName)}, ${token.length.toLocaleString('fr-FR')} caractères.</p>
       <div class="modal-actions">
-        <button type="button" class="btn-sell" data-share-file>Envoyer le fichier</button>
+        <button type="button" class="btn-sell" data-share-file>Envoyer l’invitation</button>
         <button type="button" class="btn-quiet" data-ok>Fermer</button>
       </div>
     </section>
@@ -695,10 +694,13 @@ async function showResellerInvite(invite) {
     const button = overlay.querySelector('[data-share-file]');
     button.disabled = true;
     try {
-      const mode = await shareInviteFile(token, name);
-      showToast(mode === 'downloaded'
-        ? `Fichier ${fileName} téléchargé. Envoyez-le au revendeur.`
-        : `Envoyez ${fileName} au revendeur. Il l’ouvre dans Tickets.`, 'ok', 6000);
+      await shareInviteFile(token, name);
+      await showConfirm({
+        title: 'Invitation',
+        text: 'Un seul fichier à envoyer dans le chat. Le revendeur l’ouvre dans Tickets avec « Rejoindre avec un code », puis « Ouvrir le fichier reçu ».',
+        confirmLabel: 'Compris',
+        hideCancel: true,
+      });
     } catch (error) {
       if (error && error.name === 'AbortError') return;
       showToast(error.message || 'Fichier impossible à partager.', 'err');
