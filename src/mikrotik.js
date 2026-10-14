@@ -14,14 +14,27 @@ function networkMessage(error) {
 
 const REACH_TIMEOUT_MS = 8000;
 
+export function endpointFrom(host, port) {
+  const raw = String(host || '').trim();
+  const fallback = Number(port) || 8728;
+  const bracket = raw.match(/^\[([^\]]+)\]:(\d+)$/);
+  const plain = raw.match(/^([^:\s]+):(\d+)$/);
+  const match = bracket || plain;
+  if (match) {
+    const parsed = Number(match[2]);
+    if (parsed >= 1 && parsed <= 65535) return { host: match[1], port: parsed };
+  }
+  return { host: raw, port: fallback };
+}
+
 function reachTimeout(timeoutMs) {
   return Math.min(Math.max(Number(timeoutMs) || REACH_TIMEOUT_MS, 1000), REACH_TIMEOUT_MS);
 }
 
 export function runCommands(router, commands, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
-    const port = Number(router.port) || 8728;
-    const socket = net.connect({ host: router.host, port });
+    const endpoint = endpointFrom(router.host, router.port);
+    const socket = net.connect({ host: endpoint.host, port: endpoint.port });
     socket.setNoDelay(true);
     // Tant que l’API n’a pas répondu à l’ouverture, on lâche. Ensuite le
     // budget complet reste disponible pour un gros print.

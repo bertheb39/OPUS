@@ -248,7 +248,7 @@ function showConfirm({ title, text, confirmLabel = 'Confirmer', danger = false, 
             ? passwordField({ id: 'confirm-factory-password', name: 'factoryPassword', autocomplete: 'current-password', required: true })
             : `<input id="confirm-factory-password" name="factoryPassword" type="password" autocomplete="current-password" required>`}
         ` : ''}
-        <div class="modal-actions">
+        <div class="modal-actions${hideCancel ? ' is-single' : ''}">
           ${hideCancel ? '' : '<button type="button" class="btn-quiet" data-cancel>Annuler</button>'}
           <button type="button" class="${danger ? 'btn-danger' : 'btn-sell'}" data-ok>${esc(confirmLabel)}</button>
         </div>
@@ -291,7 +291,7 @@ async function api(url, options = {}) {
   return localApi(url, options);
 }
 
-const APP_VERSION = '2.8.9';
+const APP_VERSION = '2.8.10';
 const UPDATE_REPO = 'bertheb39/OPUS';
 const activityKey = 'opus.activity';
 const currencyKey = 'opus.currency';
@@ -680,7 +680,7 @@ async function showResellerInvite(invite) {
       ${meta && lots === 0 && stockTotal === 0 ? '<p class="meta">Aucun lot ni stock dans ce code : attribuez d’abord des lots (ou ajoutez du stock), puis renvoyez l’invitation.</p>' : ''}
       <p class="meta">Fichier ${esc(fileName)}, ${token.length.toLocaleString('fr-FR')} caractères.</p>
       <div class="modal-actions">
-        <button type="button" class="btn-sell" data-share-file>Envoyer l’invitation</button>
+        <button type="button" class="btn-sell" data-share-file>Inviter</button>
         <button type="button" class="btn-quiet" data-ok>Fermer</button>
       </div>
     </section>

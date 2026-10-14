@@ -2,7 +2,7 @@ import net from 'node:net';
 import assert from 'node:assert/strict';
 import { parseProfileScript, formatSaleComment, generateResellerCode, isLimitUptime, normalizeResellerName, validateResellerName } from './hmp.js';
 import { encodeSentence, takeSentence } from './protocol.js';
-import { createHotspotUser, fetchProfiles, runCommands } from './mikrotik.js';
+import { createHotspotUser, endpointFrom, fetchProfiles, runCommands } from './mikrotik.js';
 
 const script = `:put (",remc,100,24h,100,,Disable,Disable,");
 :local mode "X";
@@ -181,5 +181,11 @@ await assert.rejects(
   ),
 );
 assert.ok(Date.now() - refusedStarted < 3000, 'port fermé trop long');
+
+assert.deepEqual(endpointFrom('v5.mikroot.com:2025', 8728), { host: 'v5.mikroot.com', port: 2025 });
+assert.deepEqual(endpointFrom('vpn.exemple.net:10443', 8728), { host: 'vpn.exemple.net', port: 10443 });
+assert.deepEqual(endpointFrom('10.147.17.2', 8291), { host: '10.147.17.2', port: 8291 });
+assert.deepEqual(endpointFrom('192.168.88.1', 8728), { host: '192.168.88.1', port: 8728 });
+assert.deepEqual(endpointFrom('[2001:db8::1]:8729', 8728), { host: '2001:db8::1', port: 8729 });
 
 console.log('selfcheck ok');

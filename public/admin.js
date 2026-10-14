@@ -204,7 +204,7 @@ function renderRouters() {
             <label>Adresse locale (Wi-Fi)</label>
             <input name="host" value="${esc(router.host)}" required>
             <label>Adresse VPN (admin)</label>
-            <input name="admin_host" value="${esc(router.admin_host || '')}" placeholder="Facultatif">
+            <input name="admin_host" value="${esc(router.admin_host || '')}" placeholder="nom-ou-ip:port">
             <label>Utilisateur API</label>
             <input name="username" value="${esc(router.username)}" required>
             <label>Mot de passe API</label>
@@ -244,7 +244,8 @@ function renderRouters() {
         <label>Adresse locale (Wi-Fi)</label>
         <input name="host" required placeholder="192.168.88.1" inputmode="decimal">
         <label>Adresse VPN (admin)</label>
-        <input name="admin_host" placeholder="Facultatif">
+        <input name="admin_host" placeholder="nom-ou-ip:port">
+        <p class="help">Collez l’adresse avec le port, comme dans Mikhmon.</p>
         <label>Utilisateur API</label>
         <input name="username" required autocomplete="off">
         <label>Mot de passe API</label>

@@ -69,6 +69,19 @@ function cleanHost(value) {
   return String(value || '').trim().replace(/^https?:\/\//i, '').split('/')[0].trim();
 }
 
+function hostEndpoint(host, port) {
+  const raw = String(host || '').trim();
+  const fallback = Number(port) || 8728;
+  const bracket = raw.match(/^\[([^\]]+)\]:(\d+)$/);
+  const plain = raw.match(/^([^:\s]+):(\d+)$/);
+  const match = bracket || plain;
+  if (match) {
+    const parsed = Number(match[2]);
+    if (parsed >= 1 && parsed <= 65535) return { host: match[1], port: parsed };
+  }
+  return { host: raw, port: fallback };
+}
+
 function generateResellerCode(usedCodes) {
   const used = new Set((usedCodes || []).map((code) => String(code)));
   for (let attempt = 0; attempt < 40; attempt += 1) {
@@ -1455,11 +1468,12 @@ function routerPlugin() {
 
 async function routerRunOnce(router, commands, timeoutMs) {
   const plugin = routerPlugin();
+  const endpoint = hostEndpoint(router.host, router.port);
   if (plugin) {
     try {
       const response = await plugin.run({
-        host: router.host,
-        port: Number(router.port) || 8728,
+        host: endpoint.host,
+        port: endpoint.port,
         username: router.username,
         password: router.password,
         timeout: timeoutMs || 15000,
@@ -1481,8 +1495,8 @@ async function routerRunOnce(router, commands, timeoutMs) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        host: router.host,
-        port: Number(router.port) || 8728,
+        host: endpoint.host,
+        port: endpoint.port,
         username: router.username,
         password: router.password,
         timeout: timeoutMs || 15000,

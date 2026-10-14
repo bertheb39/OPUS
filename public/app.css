@@ -1321,6 +1321,18 @@ body.has-dock main > .modal-overlay > .modal {
 
 .modal-actions button { width: 100%; margin-top: 8px; }
 
+.modal-actions.is-single {
+  grid-template-columns: 1fr;
+  justify-items: center;
+}
+
+.modal-actions.is-single button {
+  width: auto;
+  min-width: 9rem;
+  padding-left: 28px;
+  padding-right: 28px;
+}
+
 .quota-pair {
   display: grid;
   grid-template-columns: 1fr 1fr;
