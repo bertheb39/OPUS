@@ -27,10 +27,11 @@ final class RouterOsClient {
     ) throws IOException {
         Socket socket = new Socket();
         try {
-            // Connexion : échouer vite si l’hôte est mort ; lecture : budget complet.
-            int connectTimeout = Math.min(Math.max(timeoutMs, 1000), 8000);
-            socket.connect(new InetSocketAddress(host, port), connectTimeout);
-            socket.setSoTimeout(Math.max(timeoutMs, 1000));
+            // Connexion et première réponse : échouer vite si l’hôte est mort.
+            // Après l’ouverture de session, la lecture garde le budget complet.
+            int reachTimeout = Math.min(Math.max(timeoutMs, 1000), 8000);
+            socket.connect(new InetSocketAddress(host, port), reachTimeout);
+            socket.setSoTimeout(reachTimeout);
             socket.setTcpNoDelay(true);
             OutputStream out = socket.getOutputStream();
             InputStream in = socket.getInputStream();
@@ -42,6 +43,7 @@ final class RouterOsClient {
             queue.add(login);
             queue.addAll(commands);
             List<List<Map<String, String>>> results = new ArrayList<>();
+            boolean loggedIn = false;
             for (List<String> sentence : queue) {
                 out.write(encodeSentence(sentence));
                 out.flush();
@@ -54,6 +56,10 @@ final class RouterOsClient {
                         rows.add(toRecord(words));
                     } else if ("!done".equals(kind)) {
                         results.add(rows);
+                        if (!loggedIn) {
+                            loggedIn = true;
+                            socket.setSoTimeout(Math.max(timeoutMs, 1000));
+                        }
                         break;
                     } else if ("!trap".equals(kind) || "!fatal".equals(kind)) {
                         Map<String, String> info = toRecord(words);

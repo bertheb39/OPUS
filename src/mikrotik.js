@@ -12,11 +12,21 @@ function networkMessage(error) {
   return 'Impossible de joindre le routeur.';
 }
 
+const REACH_TIMEOUT_MS = 8000;
+
+function reachTimeout(timeoutMs) {
+  return Math.min(Math.max(Number(timeoutMs) || REACH_TIMEOUT_MS, 1000), REACH_TIMEOUT_MS);
+}
+
 export function runCommands(router, commands, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     const port = Number(router.port) || 8728;
     const socket = net.connect({ host: router.host, port });
     socket.setNoDelay(true);
+    // Tant que l’API n’a pas répondu à l’ouverture, on lâche. Ensuite le
+    // budget complet reste disponible pour un gros print.
+    const reach = reachTimeout(timeoutMs);
+    socket.setTimeout(reach);
     const state = { buf: Buffer.alloc(0) };
     const queue = [
       ['/login', `=name=${router.username}`, `=password=${router.password}`],
@@ -26,15 +36,24 @@ export function runCommands(router, commands, timeoutMs = 15000) {
     let step = 0;
     let current = null;
     let settled = false;
+    let loggedIn = false;
+    let connectTimer = null;
 
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(connectTimer);
       socket.destroy();
       if (error) reject(error);
       else resolve(value);
     };
+
+    connectTimer = setTimeout(() => {
+      const error = new Error('Le routeur ne répond pas.');
+      error.code = 'TIMEOUT';
+      finish(error);
+    }, reach);
 
     const timer = setTimeout(() => {
       const error = new Error('Le routeur ne répond pas.');
@@ -51,7 +70,15 @@ export function runCommands(router, commands, timeoutMs = 15000) {
       socket.write(encodeSentence(queue[step]));
     };
 
-    socket.on('connect', sendNext);
+    socket.on('connect', () => {
+      clearTimeout(connectTimer);
+      sendNext();
+    });
+    socket.on('timeout', () => {
+      const error = new Error('Le routeur ne répond pas.');
+      error.code = 'TIMEOUT';
+      finish(error);
+    });
     socket.on('error', (error) => {
       const wrapped = new Error(networkMessage(error));
       wrapped.code = 'NETWORK';
@@ -74,6 +101,10 @@ export function runCommands(router, commands, timeoutMs = 15000) {
           } else if (kind === '!done') {
             results.push({ rows: current?.rows || [], done: wordsToRecord(words) });
             current = null;
+            if (!loggedIn) {
+              loggedIn = true;
+              socket.setTimeout(Math.max(timeoutMs, 1000));
+            }
             step += 1;
             sendNext();
           } else if (kind === '!trap' || kind === '!fatal') {

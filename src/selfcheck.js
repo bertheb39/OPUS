@@ -2,7 +2,7 @@ import net from 'node:net';
 import assert from 'node:assert/strict';
 import { parseProfileScript, formatSaleComment, generateResellerCode, isLimitUptime, normalizeResellerName, validateResellerName } from './hmp.js';
 import { encodeSentence, takeSentence } from './protocol.js';
-import { createHotspotUser, fetchProfiles } from './mikrotik.js';
+import { createHotspotUser, fetchProfiles, runCommands } from './mikrotik.js';
 
 const script = `:put (",remc,100,24h,100,,Disable,Disable,");
 :local mode "X";
@@ -155,4 +155,31 @@ assert.ok(login.includes('=name=api'));
 assert.ok(login.includes('=password=secret'));
 
 server.close();
+
+const silent = net.createServer(() => {});
+await new Promise((resolve) => silent.listen(0, '127.0.0.1', resolve));
+const silentPort = silent.address().port;
+const silentStarted = Date.now();
+await assert.rejects(
+  () => runCommands(
+    { host: '127.0.0.1', port: silentPort, username: 'api', password: 'secret' },
+    [['/system/identity/print']],
+    30000,
+  ),
+  (error) => error && error.code === 'TIMEOUT',
+);
+const silentElapsed = Date.now() - silentStarted;
+silent.close();
+assert.ok(silentElapsed < 12000, `routeur muet trop long : ${silentElapsed} ms`);
+
+const refusedStarted = Date.now();
+await assert.rejects(
+  () => runCommands(
+    { host: '127.0.0.1', port: 1, username: 'api', password: 'secret' },
+    [['/system/identity/print']],
+    30000,
+  ),
+);
+assert.ok(Date.now() - refusedStarted < 3000, 'port fermé trop long');
+
 console.log('selfcheck ok');
