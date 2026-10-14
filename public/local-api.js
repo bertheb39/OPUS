@@ -2682,6 +2682,18 @@ function reportWindow(query, lockedResellerId) {
   };
 }
 
+/** Mois en cours pour les cartes, et la période choisie si elle commence avant. */
+function reportSyncBounds(range) {
+  return {
+    from: range.from < range.monthFrom ? range.from : range.monthFrom,
+    to: range.to > range.today ? range.to : range.today,
+  };
+}
+
+function saleDay(sale) {
+  return String(sale?.sale_date || sale?.connected_at || '').slice(0, 10);
+}
+
 function dedupeSaleRows(rows) {
   const seen = new Set();
   const out = [];
@@ -2696,17 +2708,25 @@ function dedupeSaleRows(rows) {
 
 async function reportRows(range) {
   const sales = (await getAll('sales')).filter((sale) => sale.script_key);
+  const wantedReseller = Number(range.resellerId) || 0;
+  const wantedRouter = Number(range.routerId) || 0;
   const inScope = (sale) => (
-    (!range.resellerId || sale.reseller_id === range.resellerId)
-    && (!range.routerId || sale.router_id === range.routerId)
+    (!wantedReseller || Number(sale.reseller_id) === wantedReseller)
+    && (!wantedRouter || Number(sale.router_id) === wantedRouter)
   );
   const scoped = dedupeSaleRows(sales.filter(inScope));
   const period = scoped
-    .filter((sale) => sale.sale_date >= range.from && sale.sale_date <= range.to)
+    .filter((sale) => {
+      const day = saleDay(sale);
+      return day >= range.from && day <= range.to;
+    })
     .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
   return {
-    todayRows: scoped.filter((sale) => sale.sale_date === range.today),
-    monthRows: scoped.filter((sale) => sale.sale_date >= range.monthFrom && sale.sale_date < range.monthNext),
+    todayRows: scoped.filter((sale) => saleDay(sale) === range.today),
+    monthRows: scoped.filter((sale) => {
+      const day = saleDay(sale);
+      return day >= range.monthFrom && day < range.monthNext;
+    }),
     periodRows: period.slice(0, 500),
     periodAll: period,
     periodCount: period.length,
@@ -3647,8 +3667,7 @@ async function handle(method, url, body) {
       : await syncHapSales({
         resellerId: range.resellerId,
         routerId: range.routerId,
-        from: range.from < range.monthFrom ? range.from : range.monthFrom,
-        to: range.to > range.today ? range.to : range.today,
+        ...reportSyncBounds(range),
         force: query.get('force') === '1',
       });
     const rows = await reportRows(range);
@@ -3708,8 +3727,7 @@ async function handle(method, url, body) {
       : await syncHapSales({
         resellerId: range.resellerId,
         routerId: range.routerId,
-        from: range.from < range.monthFrom ? range.from : range.monthFrom,
-        to: range.to > range.today ? range.to : range.today,
+        ...reportSyncBounds(range),
         force: query.get('force') === '1',
       });
     const rows = await reportRows(range);
@@ -3872,8 +3890,7 @@ async function handle(method, url, body) {
       ? { warning: '', created: 0, removed: 0, read: 0 }
       : await syncHapSales({
         resellerId: resellerSession.id,
-        from: range.monthFrom,
-        to: range.today,
+        ...reportSyncBounds(range),
         force: query.get('force') === '1',
       });
     const rows = await reportRows(range);
