@@ -7,7 +7,7 @@ function renderWelcome() {
     <section class="card">
       <h1>Tickets</h1>
       <button class="btn-sell btn-block" type="button" data-action="invite" ${busy ? 'disabled' : ''}>Rejoindre avec un code</button>
-      <p class="help">Revendeurs : collez l’invitation envoyée par l’administration (WhatsApp, SMS…), puis entrez votre mot de passe.</p>
+      <p class="help">Revendeurs : ouvrez le fichier d’invitation reçu, puis entrez votre mot de passe.</p>
       <button class="btn-quiet btn-block" type="button" data-action="nouveau" ${busy ? 'disabled' : ''}>Première installation</button>
       <p class="help">Uniquement pour créer le tout premier administrateur sur un téléphone encore vide.</p>
       ${typeof licenseAllowsDrive === 'function' && !licenseAllowsDrive() ? '' : `
@@ -21,14 +21,14 @@ function renderInvite() {
   app.innerHTML = `
     <section class="card card-auth">
       <h1>Invitation</h1>
-      <p class="help">Collez le code du 2ᵉ message, ou ouvrez le fichier .txt reçu dans le même chat.</p>
-      <form data-form="invite">
-        <label for="invite-code">Code d’invitation</label>
-        <textarea id="invite-code" name="token" rows="6" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Collez le code OPUS1.… (2ᵉ message)"></textarea>
-        <button class="btn-sell btn-block" type="submit" ${busy ? 'disabled' : ''}>Valider l’invitation</button>
-      </form>
-      <button class="btn-quiet btn-block" type="button" data-action="invite-file" ${busy ? 'disabled' : ''}>Ouvrir le fichier reçu</button>
+      <p class="help">Ouvrez le fichier .txt reçu de l’administration. Il contient le code.</p>
+      <button class="btn-sell btn-block" type="button" data-action="invite-file" ${busy ? 'disabled' : ''}>Ouvrir le fichier reçu</button>
       <input id="invite-file" type="file" hidden>
+      <form data-form="invite">
+        <label for="invite-code">Ancien code collé</label>
+        <textarea id="invite-code" name="token" rows="4" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Seulement si vous avez encore un code OPUS1 collé"></textarea>
+        <button class="btn-quiet btn-block" type="submit" ${busy ? 'disabled' : ''}>Valider un code collé</button>
+      </form>
       <button class="btn-quiet btn-block" type="button" data-action="welcome">Retour</button>
     </section>
   `;
