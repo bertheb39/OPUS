@@ -399,6 +399,57 @@ public class RouterOsPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void shareTextFile(PluginCall call) {
+        String text = call.getString("text", "");
+        String name = call.getString("name", "invitation.txt");
+        boolean append = Boolean.TRUE.equals(call.getBoolean("append", false));
+        boolean finish = !Boolean.FALSE.equals(call.getBoolean("finish", true));
+        if (getActivity() == null || getContext() == null) {
+            call.reject("Impossible de partager le fichier.");
+            return;
+        }
+        if ((text == null || text.isEmpty()) && !finish) {
+            call.reject("Fichier d'invitation vide.");
+            return;
+        }
+        try {
+            File dir = new File(getContext().getCacheDir(), "share");
+            if (!dir.exists() && !dir.mkdirs()) {
+                call.reject("Impossible de partager le fichier.");
+                return;
+            }
+            String safeName = (name == null || name.isEmpty()) ? "invitation.txt" : name.replaceAll("[\\\\/:*?\"<>|]", "_");
+            File file = new File(dir, safeName);
+            if (text != null && !text.isEmpty()) {
+                try (FileOutputStream out = new FileOutputStream(file, append)) {
+                    out.write(text.getBytes(StandardCharsets.UTF_8));
+                }
+            }
+            if (!finish) {
+                call.resolve();
+                return;
+            }
+            if (!file.isFile() || file.length() == 0) {
+                call.reject("Fichier d'invitation vide.");
+                return;
+            }
+            Uri uri = FileProvider.getUriForFile(getContext(), getContext().getPackageName() + ".fileprovider", file);
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType("text/plain");
+            send.putExtra(Intent.EXTRA_STREAM, uri);
+            send.putExtra(Intent.EXTRA_SUBJECT, safeName);
+            send.setClipData(ClipData.newRawUri("", uri));
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            Intent chooser = Intent.createChooser(send, "Partager l'invitation");
+            chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            getActivity().startActivity(chooser);
+            call.resolve();
+        } catch (Exception error) {
+            call.reject("Impossible de partager le fichier.");
+        }
+    }
+
+    @PluginMethod
     public void saveTextFile(PluginCall call) {
         String text = call.getString("text", "");
         if (text == null || text.isEmpty() || getActivity() == null || getContext() == null) {

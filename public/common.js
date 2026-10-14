@@ -575,6 +575,33 @@ function showQr(code, url) {
   document.body.appendChild(overlay);
 }
 
+const WHATSAPP_TEXT_LIMIT = 60000;
+
+function inviteFitsMessage(token) {
+  return String(token || '').length <= WHATSAPP_TEXT_LIMIT;
+}
+
+function inviteFileName(name) {
+  const safe = String(name || 'revendeur').replace(/[^\w.-]+/g, '_').replace(/_+/g, '_').slice(0, 40);
+  return `invitation-${safe || 'revendeur'}.txt`;
+}
+
+function inviteGuideForFile(name) {
+  return [
+    `Tickets — invitation pour ${name}`,
+    '',
+    'Message 1 / 2 — à lire avant le fichier.',
+    '',
+    '1) Ouvrez Tickets sur ce téléphone.',
+    '2) Touchez « Rejoindre avec un code ».',
+    '3) Touchez « Ouvrir le fichier reçu ».',
+    '4) Choisissez le fichier .txt du message suivant.',
+    '5) Entrez ensuite le mot de passe revendeur.',
+    '',
+    'N’utilisez pas « Première installation ».',
+  ].join('\n');
+}
+
 async function sharePlainText(text, title = 'Partager') {
   const payload = String(text || '').trim();
   if (!payload) throw new Error('Rien à partager.');
@@ -584,10 +611,66 @@ async function sharePlainText(text, title = 'Partager') {
     return 'shared';
   }
   if (navigator.share) {
-    await navigator.share({ title, text: payload });
-    return 'shared';
+    try {
+      await navigator.share({ title, text: payload });
+      return 'shared';
+    } catch (error) {
+      if (error && error.name === 'AbortError') {
+        const abort = new Error('Partage annulé.');
+        abort.name = 'AbortError';
+        throw abort;
+      }
+      throw new Error('Partage indisponible sur cet ordinateur. Sur le téléphone, choisissez WhatsApp.');
+    }
   }
   throw new Error('Partage indisponible sur cet appareil.');
+}
+
+async function downloadTextFile(text, fileName) {
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+async function shareInviteFile(token, name) {
+  const payload = String(token || '');
+  if (!payload) throw new Error('Invitation vide.');
+  const fileName = inviteFileName(name);
+  const plugin = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.RouterOs;
+  if (plugin && plugin.shareTextFile) {
+    const chunk = 180000;
+    for (let index = 0; index < payload.length; index += chunk) {
+      const last = index + chunk >= payload.length;
+      await plugin.shareTextFile({
+        text: payload.slice(index, index + chunk),
+        name: fileName,
+        append: index > 0,
+        finish: last,
+      });
+    }
+    return 'shared';
+  }
+  const file = new File([payload], fileName, { type: 'text/plain' });
+  if (navigator.share && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
+    try {
+      await navigator.share({ files: [file], title: fileName });
+      return 'shared';
+    } catch (error) {
+      if (error && error.name === 'AbortError') {
+        const abort = new Error('Partage annulé.');
+        abort.name = 'AbortError';
+        throw abort;
+      }
+    }
+  }
+  await downloadTextFile(payload, fileName);
+  return 'downloaded';
 }
 
 async function sharePlainTexts(messages, title = 'Partager') {
@@ -648,25 +731,37 @@ async function showResellerInvite(invite) {
     ? `Ce code emporte : ${profiles} forfait${profiles > 1 ? 's' : ''} · ${lots} lot${lots > 1 ? 's' : ''}${pending ? ` (${pending} en cours)` : ''} · stock app ${stockTotal}.`
     : '';
   if (!token) throw new Error('Invitation vide.');
+  const fitsMessage = inviteFitsMessage(token);
+  const guide = fitsMessage ? guideText : inviteGuideForFile(name);
+  const fileName = inviteFileName(name);
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
     <section class="modal modal-form" role="dialog" aria-modal="true">
       <h2>Inviter ${esc(name)}</h2>
+      ${fitsMessage ? `
       <p><strong>Deux messages</strong>, dans le même chat WhatsApp, dans cet ordre. Ne les mélangez pas.</p>
       <p class="meta">1) Envoyez le guide. 2) Envoyez le code OPUS1 tout seul.</p>
+      ` : `
+      <p><strong>Un guide, puis un fichier.</strong> Ce code est trop long pour un message WhatsApp.</p>
+      <p class="meta">1) Envoyez le guide. 2) Envoyez le fichier ${esc(fileName)} dans le même chat.</p>
+      `}
       ${summary ? `<p class="meta">${esc(summary)}</p>` : ''}
       ${meta && lots === 0 && stockTotal === 0 ? '<p class="meta">Aucun lot ni stock dans ce code : attribuez d’abord des lots (ou ajoutez du stock), puis renvoyez l’invitation.</p>' : ''}
       <label>Message 1 — Guide</label>
-      <textarea class="invite-share" readonly rows="8">${esc(guideText)}</textarea>
-      <label>Message 2 — Code (OPUS1 seul)</label>
-      <p class="meta">Code prêt, ${token.length.toLocaleString('fr-FR')} caractères. Il commence par ${esc(token.slice(0, 12))}… Copiez-le ou partagez-le : il part en entier.</p>
+      <textarea class="invite-share" readonly rows="8">${esc(guide)}</textarea>
+      <label>Message 2 — ${fitsMessage ? 'Code (OPUS1 seul)' : 'Fichier du code'}</label>
+      <p class="meta">${fitsMessage
+        ? `Code prêt, ${token.length.toLocaleString('fr-FR')} caractères. Il commence par ${esc(token.slice(0, 12))}…`
+        : `Fichier ${esc(fileName)}, ${token.length.toLocaleString('fr-FR')} caractères. Le revendeur l’ouvre avec « Ouvrir le fichier reçu ».`}</p>
       <div class="modal-actions">
-        <button type="button" class="btn-sell" data-share-both>Partager les 2 messages</button>
+        ${fitsMessage ? '<button type="button" class="btn-sell" data-share-both>Partager les 2 messages</button>' : '<button type="button" class="btn-sell" data-share-file>Partager le fichier</button>'}
         <button type="button" class="btn-quiet" data-share-guide>Partager le guide</button>
         <button type="button" class="btn-quiet" data-copy-guide>Copier le guide</button>
+        ${fitsMessage ? `
         <button type="button" class="btn-quiet" data-share-code>Partager le code</button>
         <button type="button" class="btn-quiet" data-copy-code>Copier le code</button>
+        ` : ''}
         <button type="button" class="btn-quiet" data-ok>Fermer</button>
       </div>
     </section>
@@ -678,13 +773,13 @@ async function showResellerInvite(invite) {
   overlay.querySelector('[data-ok]').addEventListener('click', close);
   overlay.querySelector('[data-copy-guide]').addEventListener('click', async () => {
     try {
-      await copyPlainText(guideText);
+      await copyPlainText(guide);
       showToast('Guide copié.', 'ok');
     } catch (error) {
       showToast(error.message || 'Copie impossible.', 'err');
     }
   });
-  overlay.querySelector('[data-copy-code]').addEventListener('click', async () => {
+  overlay.querySelector('[data-copy-code]')?.addEventListener('click', async () => {
     try {
       await copyPlainText(token);
       showToast('Code copié.', 'ok');
@@ -700,7 +795,9 @@ async function showResellerInvite(invite) {
     const button = overlay.querySelector('[data-share-guide]');
     button.disabled = true;
     try {
-      await shareOne(guideText, `Tickets — guide ${name}`, 'Message 1 envoyé. Envoyez ensuite le code.');
+      await shareOne(guide, `Tickets — guide ${name}`, fitsMessage
+        ? 'Message 1 envoyé. Envoyez ensuite le code.'
+        : 'Guide envoyé. Envoyez ensuite le fichier dans le même chat.');
     } catch (error) {
       if (error && error.name === 'AbortError') return;
       showToast(error.message || 'Partage impossible.', 'err');
@@ -708,7 +805,22 @@ async function showResellerInvite(invite) {
       button.disabled = false;
     }
   });
-  overlay.querySelector('[data-share-code]').addEventListener('click', async () => {
+  overlay.querySelector('[data-share-file]')?.addEventListener('click', async () => {
+    const button = overlay.querySelector('[data-share-file]');
+    button.disabled = true;
+    try {
+      const mode = await shareInviteFile(token, name);
+      showToast(mode === 'downloaded'
+        ? `Fichier ${fileName} téléchargé. Envoyez-le dans le chat, après le guide.`
+        : `Fichier prêt. Envoyez ${fileName} dans le même chat WhatsApp.`, 'ok', 6000);
+    } catch (error) {
+      if (error && error.name === 'AbortError') return;
+      showToast(error.message || 'Fichier impossible à partager.', 'err');
+    } finally {
+      button.disabled = false;
+    }
+  });
+  overlay.querySelector('[data-share-code]')?.addEventListener('click', async () => {
     const button = overlay.querySelector('[data-share-code]');
     button.disabled = true;
     try {
@@ -720,7 +832,7 @@ async function showResellerInvite(invite) {
       button.disabled = false;
     }
   });
-  overlay.querySelector('[data-share-both]').addEventListener('click', async () => {
+  overlay.querySelector('[data-share-both]')?.addEventListener('click', async () => {
     const button = overlay.querySelector('[data-share-both]');
     button.disabled = true;
     try {

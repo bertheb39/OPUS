@@ -21,12 +21,14 @@ function renderInvite() {
   app.innerHTML = `
     <section class="card card-auth">
       <h1>Invitation</h1>
-      <p class="help">Collez uniquement le code (2ᵉ message WhatsApp), qui commence par OPUS1.</p>
+      <p class="help">Collez le code du 2ᵉ message, ou ouvrez le fichier .txt reçu dans le même chat.</p>
       <form data-form="invite">
         <label for="invite-code">Code d’invitation</label>
-        <textarea id="invite-code" name="token" rows="6" required autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Collez le code OPUS1.… (2ᵉ message)"></textarea>
+        <textarea id="invite-code" name="token" rows="6" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Collez le code OPUS1.… (2ᵉ message)"></textarea>
         <button class="btn-sell btn-block" type="submit" ${busy ? 'disabled' : ''}>Valider l’invitation</button>
       </form>
+      <button class="btn-quiet btn-block" type="button" data-action="invite-file" ${busy ? 'disabled' : ''}>Ouvrir le fichier reçu</button>
+      <input id="invite-file" type="file" hidden>
       <button class="btn-quiet btn-block" type="button" data-action="welcome">Retour</button>
     </section>
   `;
@@ -120,6 +122,10 @@ app.addEventListener('click', async (event) => {
     renderInvite();
     return;
   }
+  if (action === 'invite-file') {
+    document.getElementById('invite-file')?.click();
+    return;
+  }
   if (action === 'reset-admin') {
     renderEnter({ reset: true });
     return;
@@ -157,6 +163,33 @@ app.addEventListener('click', async (event) => {
   }
 });
 
+app.addEventListener('change', async (event) => {
+  const input = event.target;
+  if (!input || input.id !== 'invite-file' || !input.files || !input.files[0] || busy) return;
+  const file = input.files[0];
+  input.value = '';
+  busy = true;
+  try {
+    const token = extractInviteToken(await file.text());
+    if (!/^OPUS1(?:\.gz)?\./i.test(token)) {
+      throw new Error('Ce fichier ne contient pas de code OPUS1.');
+    }
+    const result = await api('/api/invite/accept', { method: 'POST', body: { token } });
+    needsSetup = false;
+    busy = false;
+    renderEnter({ setup: false });
+    const lots = Number(result.assigned) || 0;
+    const stock = Number(result.stock) || 0;
+    const detail = lots || stock
+      ? ` (${lots} lot${lots > 1 ? 's' : ''}${stock ? `, stock ${stock}` : ''})`
+      : '';
+    showToast(`Compte ${result.name || 'revendeur'} prêt${detail}. Entrez votre mot de passe.`, 'ok', 4500);
+  } catch (error) {
+    showToast(error.message, 'err', 4500);
+    busy = false;
+  }
+});
+
 app.addEventListener('submit', async (event) => {
   const form = event.target.closest('form');
   if (!form) return;
@@ -177,6 +210,9 @@ app.addEventListener('submit', async (event) => {
     }
     if (form.dataset.form === 'invite') {
       const token = extractInviteToken(data.token);
+      if (!/^OPUS1(?:\.gz)?\./i.test(token)) {
+        throw new Error('Collez le code OPUS1, ou ouvrez le fichier reçu.');
+      }
       const result = await api('/api/invite/accept', { method: 'POST', body: { token } });
       needsSetup = false;
       busy = false;

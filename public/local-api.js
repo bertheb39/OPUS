@@ -940,10 +940,11 @@ async function encodeInviteToken(pack) {
   // Un CompressionStream bloqué (WebView) faisait tourner « Inviter » sans fin.
   if (typeof CompressionStream === 'function' && json.length > 1500) {
     try {
+      const budget = Math.min(12000, 2000 + Math.floor(json.length / 400));
       const compressed = await Promise.race([
         transformBytes(json, CompressionStream, 'gzip'),
         new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('gzip-timeout')), 1500);
+          setTimeout(() => reject(new Error('gzip-timeout')), budget);
         }),
       ]);
       if (compressed.length + 20 < json.length) {
