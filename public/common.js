@@ -189,15 +189,15 @@ function showBrandSplash({ minMs = 2600 } = {}) {
     root.id = 'brand-splash';
     root.className = 'brand-splash';
     root.setAttribute('role', 'img');
-    root.setAttribute('aria-label', 'HORIZON TEAM');
+    root.setAttribute('aria-label', 'Outil de gestion du hotspot');
     root.innerHTML = `
       <div class="brand-splash-stage">
         <span class="brand-splash-ring brand-splash-ring-a" aria-hidden="true"></span>
         <span class="brand-splash-ring brand-splash-ring-b" aria-hidden="true"></span>
         <span class="brand-splash-glow" aria-hidden="true"></span>
-        <img class="brand-splash-logo" src="Logo.png" alt="HORIZON TEAM" width="168" height="168" decoding="async">
+        <img class="brand-splash-logo" src="app-icon.png" alt="" width="168" height="168" decoding="async">
       </div>
-      <p class="brand-splash-copy"><strong>Cette application est la propriété de HORIZON TEAM</strong></p>
+      <p class="brand-splash-copy">Outil de gestion du hotspot</p>
     `;
     document.body.appendChild(root);
   }

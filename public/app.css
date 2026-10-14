@@ -1935,7 +1935,7 @@ body.has-dock main > .modal-overlay > .modal {
   }
 }
 
-/* —— Splash marque HORIZON TEAM —— */
+/* —— Écran de démarrage —— */
 .brand-splash {
   position: fixed;
   inset: 0;
@@ -1969,9 +1969,11 @@ body.has-dock main > .modal-overlay > .modal {
 .brand-splash-logo {
   position: relative;
   z-index: 2;
-  width: min(148px, 42vw);
-  height: auto;
-  object-fit: contain;
+  width: min(136px, 38vw);
+  height: min(136px, 38vw);
+  object-fit: cover;
+  border-radius: 28%;
+  background: #fff;
   filter: drop-shadow(0 10px 24px rgba(0, 0, 0, 0.35));
   animation: brand-logo-in 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
@@ -2008,17 +2010,14 @@ body.has-dock main > .modal-overlay > .modal {
 
 .brand-splash-copy {
   margin: 0;
-  max-width: 18em;
+  max-width: 16em;
   text-align: center;
   color: #f4f7fb;
   font-size: 15px;
+  font-weight: 600;
   line-height: 1.45;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.03em;
   animation: brand-copy-in 0.7s ease 0.35s both;
-}
-
-.brand-splash-copy strong {
-  font-weight: 700;
 }
 
 @keyframes brand-logo-in {
