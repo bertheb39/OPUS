@@ -815,6 +815,7 @@ function renderRecettes() {
         <label>Revendeur</label>
         <select name="resellerId">${resellerOptions}</select>
         <button type="submit">Actualiser</button>
+        <button type="button" class="btn-quiet" data-action="export-recettes-pdf" ${data ? '' : 'disabled'}>Enregistrer le PDF</button>
       </form>
       ${data?.syncWarning ? `<p class="meta">${esc(data.syncWarning)}</p>` : ''}
       ${state.moneySyncing ? '<p class="meta">Mise à jour depuis le routeur…</p>' : ''}
@@ -1525,6 +1526,28 @@ async function onAdminClick(event) {
       };
       const bytes = buildSalesReportPdf(state.sales, filter);
       await saveReportPdf(bytes, salesReportFileName(filter));
+      showToast('Choisissez où enregistrer le PDF.', 'ok');
+    } catch (error) {
+      showToast(error.message || 'PDF impossible.', 'err');
+    }
+    return;
+  }
+  if (action === 'export-recettes-pdf') {
+    if (!state.recettes) {
+      showToast('Affichez d’abord les recettes.', 'err');
+      return;
+    }
+    try {
+      const reseller = (state.resellers || []).find((item) => item.id === state.salesResellerId);
+      const router = (state.routers || []).find((item) => item.id === state.scopeRouterId);
+      const filter = {
+        from: state.salesFrom || state.recettes.period?.from || '',
+        to: state.salesTo || state.recettes.period?.to || '',
+        reseller: reseller ? reseller.hmpName : 'Tous les revendeurs',
+        router: router ? router.name : 'Tous les routeurs',
+      };
+      const bytes = buildRecettesPdf(state.recettes, filter);
+      await saveReportPdf(bytes, recettesReportFileName(filter));
       showToast('Choisissez où enregistrer le PDF.', 'ok');
     } catch (error) {
       showToast(error.message || 'PDF impossible.', 'err');

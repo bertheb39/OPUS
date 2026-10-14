@@ -18,6 +18,7 @@ const PDF_WIN = {
   '\u00ce': '\\316', '\u00cf': '\\317',
   '\u00d4': '\\324', '\u00d6': '\\326',
   '\u00d9': '\\331', '\u00db': '\\333', '\u00dc': '\\334',
+  '\u00b7': '\\267',
 };
 
 function pdfPlain(value) {
@@ -91,12 +92,28 @@ function pdfOps() {
       lines.push('0.6 w');
       lines.push(`${x.toFixed(2)} ${y.toFixed(2)} ${w.toFixed(2)} ${h.toFixed(2)} re S`);
     },
+    line(x1, y1, x2, y2, rgb, width = 0.6) {
+      lines.push(`${rgb} RG`);
+      lines.push(`${width} w`);
+      lines.push(`${x1.toFixed(2)} ${y1.toFixed(2)} m ${x2.toFixed(2)} ${y2.toFixed(2)} l S`);
+    },
     text(font, size, x, y, value, rgb) {
       lines.push(`${rgb} rg`);
       lines.push('BT');
       lines.push(`/${font} ${size} Tf`);
+      lines.push('0 Tc');
       lines.push(`1 0 0 1 ${x.toFixed(2)} ${y.toFixed(2)} Tm`);
       lines.push(`(${pdfEscape(value)}) Tj`);
+      lines.push('ET');
+    },
+    textSpaced(font, size, x, y, value, rgb, spacing) {
+      lines.push(`${rgb} rg`);
+      lines.push('BT');
+      lines.push(`/${font} ${size} Tf`);
+      lines.push(`${Number(spacing).toFixed(2)} Tc`);
+      lines.push(`1 0 0 1 ${x.toFixed(2)} ${y.toFixed(2)} Tm`);
+      lines.push(`(${pdfEscape(value)}) Tj`);
+      lines.push('0 Tc');
       lines.push('ET');
     },
     textRight(font, size, right, y, value, rgb) {
@@ -252,6 +269,296 @@ function pdfDocument(contents) {
   const bytes = new Uint8Array(pdf.length);
   for (let i = 0; i < pdf.length; i += 1) bytes[i] = pdf.charCodeAt(i);
   return bytes;
+}
+
+function recettesReportFileName(filter) {
+  const from = pdfFileDate(filter.from);
+  const to = pdfFileDate(filter.to);
+  const reseller = pdfPlain(filter.reseller) || 'Tous les revendeurs';
+  const router = pdfPlain(filter.router) || 'Tous les routeurs';
+  const raw = `Recettes du ${from} au ${to} - ${reseller} - ${router}.pdf`;
+  return raw.replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function pdfCash(value) {
+  if (typeof money === 'function') return money(value || 0);
+  return String(Math.round(Number(value) || 0));
+}
+
+function pdfPct(part, total) {
+  const base = Number(total) || 0;
+  const value = Number(part) || 0;
+  if (!base) return '0 %';
+  return `${Math.round((value * 100) / base)} %`;
+}
+
+function pdfTicketCount(count) {
+  const total = Number(count) || 0;
+  return `${total} ticket${total === 1 ? '' : 's'}`;
+}
+
+function pdfTodayLong() {
+  const now = new Date();
+  const month = PDF_MONTHS[now.getMonth()] || '';
+  return `${now.getDate()} ${month} ${now.getFullYear()}`;
+}
+
+function pdfRecettesFrame(ops, pageNo, pageCount, filter) {
+  const navy = '0.071 0.196 0.310';
+  const ink = '0.102 0.153 0.200';
+  const muted = '0.365 0.427 0.486';
+  const green = '0.051 0.478 0.294';
+  const due = '0.706 0.137 0.094';
+  const line = '0.835 0.878 0.910';
+  const gold = '0.910 0.784 0.486';
+  const white = '1 1 1';
+  const pale = '0.86 0.91 0.95';
+  const headerH = 100;
+  ops.fill(0, PDF_H - headerH, PDF_W, headerH, navy);
+  ops.fill(0, PDF_H - headerH - 4, PDF_W, 4, green);
+  ops.fill(0, PDF_H - headerH - 6.2, PDF_W, 2.2, gold);
+  ops.textSpaced('F2', 8, 36, PDF_H - 26, 'HORIZON TEAM', gold, 1.15);
+  ops.text('F2', 22, 36, PDF_H - 56, 'Recettes', white);
+  ops.text('F1', 9, 36, PDF_H - 76, 'Synthèse des gains', pale);
+  ops.textRight('F1', 8, PDF_W - 36, PDF_H - 30, 'Période', pale);
+  ops.textRight('F2', 10, PDF_W - 36, PDF_H - 48, `Du ${pdfLongDate(filter.from)}`, white);
+  ops.textRight('F2', 10, PDF_W - 36, PDF_H - 64, `au ${pdfLongDate(filter.to)}`, white);
+  ops.textRight('F1', 8, PDF_W - 36, PDF_H - 82, `Établi le ${pdfTodayLong()}`, pale);
+  ops.fill(0, 0, PDF_W, 6, navy);
+  ops.fill(0, 6, PDF_W, 2, green);
+  ops.line(36, 38, PDF_W - 36, 38, line, 0.5);
+  const context = `${pdfPlain(filter.router) || 'Tous les routeurs'}   ·   ${pdfPlain(filter.reseller) || 'Tous les revendeurs'}`;
+  ops.text('F1', 8, 36, 22, pdfFit(context, 390, 8), muted);
+  ops.textRight('F1', 8, PDF_W - 36, 22, `Page ${pageNo} / ${pageCount}`, muted);
+  return {
+    top: PDF_H - headerH - 26,
+    ink,
+    muted,
+    navy,
+    green,
+    due,
+    line,
+    white,
+    gold,
+    paper: '0.953 0.965 0.973',
+    zebra: '0.965 0.973 0.980',
+  };
+}
+
+function pdfRecettesMasthead(ops, y, period, colors) {
+  const bandH = 82;
+  const colW = (PDF_W - 72) / 3;
+  const total = Number(period.total) || 0;
+  const boxes = [
+    ['Total ventes', pdfCash(period.total), pdfTicketCount(period.count), colors.navy],
+    ['Parts revendeurs', pdfCash(period.resellerShare), pdfPct(period.resellerShare, total), colors.green],
+    ['Part réseau', pdfCash(period.networkShare), pdfPct(period.networkShare, total), colors.due],
+  ];
+  ops.fill(36, y - bandH, PDF_W - 72, bandH, colors.paper);
+  boxes.forEach((box, index) => {
+    const x = 36 + index * colW;
+    ops.fill(x, y - 3.5, colW, 3.5, box[3]);
+    if (index) ops.line(x, y - 68, x, y - 16, colors.line, 0.6);
+    ops.text('F1', 8, x + 12, y - 22, box[0], colors.muted);
+    ops.text('F2', 12, x + 12, y - 44, pdfFit(box[1], colW - 22, 12), box[3]);
+    ops.text('F1', 8, x + 12, y - 64, pdfFit(box[2], colW - 22, 8), colors.ink);
+  });
+  let next = y - bandH - 14;
+  if (period.missingRate) {
+    const note = `${period.missingRate} vente${period.missingRate > 1 ? 's' : ''} sans taux (${pdfCash(period.missingAmount || 0)})`;
+    ops.fill(36, next - 16, PDF_W - 72, 20, '0.996 0.957 0.886');
+    ops.fill(36, next - 16, 3, 20, '0.722 0.478 0.149');
+    ops.text('F1', 8, 48, next - 10, pdfFit(note, PDF_W - 100, 8), '0.478 0.298 0.078');
+    next -= 32;
+  }
+  return next;
+}
+
+function pdfRecettesSection(ops, y, num, title, colors) {
+  ops.fill(36, y - 16, 20, 16, colors.navy);
+  ops.text('F2', 8, 40.5, y - 11.5, num, colors.white);
+  ops.text('F2', 12, 64, y - 13, title, colors.ink);
+  const rule = 64 + title.length * 12 * 0.5 + 8;
+  if (rule < PDF_W - 40) ops.line(rule, y - 8, PDF_W - 36, y - 8, colors.green, 1);
+  return y - 30;
+}
+
+function pdfResellerColumns(ops, y, colors, filled) {
+  const head = filled ? colors.navy : '0.886 0.918 0.941';
+  const label = filled ? colors.white : colors.ink;
+  ops.fill(36, y - 16, PDF_W - 72, 16, head);
+  ops.text('F2', 7.5, 44, y - 11, 'Forfait', label);
+  ops.text('F2', 7.5, 214, y - 11, 'Tkt', label);
+  ops.textRight('F2', 7.5, 338, y - 11, 'Ventes', label);
+  ops.textRight('F2', 7.5, 452, y - 11, 'Revendeur', label);
+  ops.textRight('F2', 7.5, PDF_W - 44, y - 11, 'Réseau', label);
+  return y - 16;
+}
+
+function pdfProfileColumns(ops, y, colors) {
+  ops.fill(36, y - 18, PDF_W - 72, 18, colors.navy);
+  ops.text('F2', 8, 44, y - 12, 'Forfait', colors.white);
+  ops.text('F2', 8, 186, y - 12, 'Tickets', colors.white);
+  ops.textRight('F2', 8, 300, y - 12, 'Ventes', colors.white);
+  ops.textRight('F2', 8, 368, y - 12, 'Part du CA', colors.white);
+  ops.textRight('F2', 8, 468, y - 12, 'Revendeurs', colors.white);
+  ops.textRight('F2', 8, PDF_W - 44, y - 12, 'Réseau', colors.white);
+  return y - 18;
+}
+
+function buildRecettesPdf(data, filter) {
+  const safeFilter = {
+    from: filter?.from || data?.period?.from || '',
+    to: filter?.to || data?.period?.to || '',
+    reseller: filter?.reseller || 'Tous les revendeurs',
+    router: filter?.router || 'Tous les routeurs',
+  };
+  const period = data?.period || {
+    count: 0,
+    total: 0,
+    resellerShare: 0,
+    networkShare: 0,
+    missingRate: 0,
+    missingAmount: 0,
+  };
+  const resellers = Array.isArray(data?.byReseller) ? data.byReseller : [];
+  const profiles = Array.isArray(data?.byProfile) ? data.byProfile : [];
+  const pages = [];
+  const bottom = 52;
+  const top = PDF_H - 126;
+  const openPage = () => {
+    const page = { ops: pdfOps(), y: top };
+    pages.push(page);
+    return page;
+  };
+  const colors = {
+    ink: '0.102 0.153 0.200',
+    muted: '0.365 0.427 0.486',
+    navy: '0.071 0.196 0.310',
+    green: '0.051 0.478 0.294',
+    due: '0.706 0.137 0.094',
+    line: '0.835 0.878 0.910',
+    white: '1 1 1',
+    zebra: '0.965 0.973 0.980',
+    paper: '0.953 0.965 0.973',
+  };
+  const ensure = (page, need) => (page.y - need < bottom ? openPage() : page);
+
+  let page = openPage();
+  page.y = pdfRecettesMasthead(page.ops, page.y, period, colors);
+  if (data?.syncWarning) {
+    page = ensure(page, 18);
+    page.ops.text('F1', 8, 36, page.y - 4, pdfFit(data.syncWarning, PDF_W - 72, 8), colors.muted);
+    page.y -= 16;
+  }
+
+  page = ensure(page, 120);
+  page.y = pdfRecettesSection(page.ops, page.y, '01', 'Par revendeur', colors);
+  if (!resellers.length) {
+    page.ops.text('F1', 10, 36, page.y - 8, 'Aucune vente sur cette période.', colors.muted);
+    page.y -= 28;
+  }
+
+  resellers.forEach((row) => {
+    const profilesOf = Array.isArray(row.profiles) ? row.profiles : [];
+    page = ensure(page, 78);
+    const meta = [
+      row.routerName || '—',
+      row.rate == null ? 'taux manquant' : `taux ${row.rate} %`,
+      pdfTicketCount(row.count),
+    ].join('   ·   ');
+    page.ops.fill(36, page.y - 12, 6, 6, colors.green);
+    page.ops.text('F2', 11, 48, page.y - 12, pdfFit(row.name || 'Sans revendeur', 300, 11), colors.ink);
+    page.ops.textRight('F2', 11, PDF_W - 36, page.y - 12, pdfFit(pdfCash(row.amount), 150, 11), colors.navy);
+    page.ops.text('F1', 8, 48, page.y - 26, pdfFit(meta, 500, 8), colors.muted);
+    page.ops.text('F1', 8, 48, page.y - 44, 'Part revendeur', colors.muted);
+    page.ops.text('F2', 9, 128, page.y - 44, pdfFit(pdfCash(row.resellerShare), 130, 9), colors.green);
+    page.ops.text('F1', 8, 290, page.y - 44, 'Part réseau', colors.muted);
+    page.ops.text('F2', 9, 356, page.y - 44, pdfFit(pdfCash(row.networkShare), 140, 9), colors.due);
+    page.y -= 52;
+    if (row.missingRate) {
+      page = ensure(page, 16);
+      page.ops.text('F1', 8, 48, page.y - 2, 'Taux manquant sur une partie des ventes.', colors.due);
+      page.y -= 14;
+    }
+    if (!profilesOf.length) {
+      page.ops.line(36, page.y - 2, PDF_W - 36, page.y - 2, colors.line, 0.6);
+      page.y -= 16;
+      return;
+    }
+    page.y -= 4;
+    const drawRows = (start, suite) => {
+      if (page.y - 40 < bottom) page = openPage();
+      if (suite) {
+        page.ops.text('F2', 9, 36, page.y - 10, pdfFit(`${row.name || 'Sans revendeur'} · suite`, 420, 9), colors.ink);
+        page.y -= 16;
+      }
+      page.y = pdfResellerColumns(page.ops, page.y, colors, false);
+      let index = start;
+      while (index < profilesOf.length) {
+        if (page.y - 15 < bottom) break;
+        const item = profilesOf[index];
+        const rowTop = page.y;
+        if (index % 2 === 0) page.ops.fill(36, rowTop - 15, PDF_W - 72, 15, colors.zebra);
+        page.ops.text('F1', 8, 44, rowTop - 11, pdfFit(item.profile || '—', 156, 8), colors.ink);
+        page.ops.text('F1', 8, 214, rowTop - 11, String(item.count || 0), colors.ink);
+        page.ops.textRight('F2', 8, 338, rowTop - 11, pdfFit(pdfCash(item.amount), 90, 8), colors.ink);
+        page.ops.textRight('F1', 8, 452, rowTop - 11, pdfFit(pdfCash(item.resellerShare), 100, 8), colors.green);
+        page.ops.textRight('F1', 8, PDF_W - 44, rowTop - 11, pdfFit(pdfCash(item.networkShare), 90, 8), colors.due);
+        page.y = rowTop - 15;
+        index += 1;
+      }
+      return index;
+    };
+    let cursor = drawRows(0, page.y - 40 < bottom);
+    while (cursor < profilesOf.length) cursor = drawRows(cursor, true);
+    page.ops.line(36, page.y, PDF_W - 36, page.y, colors.line, 0.7);
+    page.y -= 18;
+  });
+
+  page = ensure(page, 140);
+  page.y = pdfRecettesSection(page.ops, page.y, '02', 'Par forfait', colors);
+  if (!profiles.length) {
+    page.ops.text('F1', 10, 36, page.y - 8, 'Aucune vente sur cette période.', colors.muted);
+    page.y -= 24;
+  } else {
+    const drawProfileHead = (continued) => {
+      page = ensure(page, 40);
+      if (continued) {
+        page.ops.text('F2', 9, 36, page.y - 10, 'Par forfait · suite', colors.ink);
+        page.y -= 16;
+      }
+      page.y = pdfProfileColumns(page.ops, page.y, colors);
+    };
+    drawProfileHead(false);
+    profiles.forEach((row, index) => {
+      if (page.y - 18 < bottom) drawProfileHead(true);
+      const rowTop = page.y;
+      if (index % 2 === 0) page.ops.fill(36, rowTop - 17, PDF_W - 72, 17, colors.zebra);
+      page.ops.text('F1', 8, 44, rowTop - 12, pdfFit(row.profile || '—', 130, 8), colors.ink);
+      page.ops.text('F1', 8, 186, rowTop - 12, String(row.count || 0), colors.ink);
+      page.ops.textRight('F2', 8, 300, rowTop - 12, pdfFit(pdfCash(row.amount), 90, 8), colors.ink);
+      page.ops.textRight('F1', 8, 368, rowTop - 12, pdfPct(row.amount, period.total), colors.muted);
+      page.ops.textRight('F1', 8, 468, rowTop - 12, pdfFit(pdfCash(row.resellerShare), 90, 8), colors.green);
+      page.ops.textRight('F1', 8, PDF_W - 44, rowTop - 12, pdfFit(pdfCash(row.networkShare), 80, 8), colors.due);
+      page.y = rowTop - 17;
+    });
+    if (page.y - 20 < bottom) drawProfileHead(true);
+    page.ops.fill(36, page.y - 18, PDF_W - 72, 18, colors.navy);
+    page.ops.text('F2', 8, 44, page.y - 12, 'Total', colors.white);
+    page.ops.text('F2', 8, 186, page.y - 12, String(period.count || 0), colors.white);
+    page.ops.textRight('F2', 8, 300, page.y - 12, pdfFit(pdfCash(period.total), 90, 8), colors.white);
+    page.ops.textRight('F2', 8, 368, page.y - 12, '100 %', colors.white);
+    page.ops.textRight('F2', 8, 468, page.y - 12, pdfFit(pdfCash(period.resellerShare), 90, 8), colors.white);
+    page.ops.textRight('F2', 8, PDF_W - 44, page.y - 12, pdfFit(pdfCash(period.networkShare), 80, 8), colors.white);
+  }
+
+  const contents = pages.map((item, index) => {
+    const framed = pdfOps();
+    pdfRecettesFrame(framed, index + 1, pages.length, safeFilter);
+    return `${framed.join()}\n${item.ops.join()}`;
+  });
+  return pdfDocument(contents);
 }
 
 function pdfBase64(bytes) {
