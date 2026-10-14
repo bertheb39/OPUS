@@ -1739,6 +1739,14 @@ function commentMatchesName(comment, name) {
   return compactText === compactWanted || compactText.endsWith(`-${compactWanted}`);
 }
 
+function lotMatchesQuery(comment, query) {
+  const wanted = commentKey(query);
+  if (!wanted) return true;
+  const text = commentKey(comment);
+  if (text.includes(wanted)) return true;
+  return commentMatchesName(comment, query);
+}
+
 async function exactCommentOwners(routerId) {
   const [assigned, sales, resellers] = await Promise.all([
     getAll('assigned'),
@@ -1778,6 +1786,22 @@ function ticketConsumed(row) {
   if (bytesIn > 0 || bytesOut > 0) return true;
   if (!uptime || uptime === '0s' || uptime === '00:00:00') return false;
   return /[1-9]/.test(uptime);
+}
+
+async function activeHotspotNames(router) {
+  try {
+    const active = await routerRun(router, [[
+      '/ip/hotspot/active/print',
+      '=.proplist=user',
+    ]], 8000);
+    const names = new Set();
+    (active[0]?.rows || []).forEach((row) => {
+      if (row.user) names.add(row.user);
+    });
+    return names;
+  } catch {
+    return new Set();
+  }
 }
 
 const ASSIGN_SCRIPT_MARK = '#OPUS-LOTS';
@@ -3462,8 +3486,9 @@ async function handle(method, url, body) {
   if (method === 'GET' && path === '/api/admin/lots') {
     const reseller = await getOne('resellers', Number(query.get('resellerId')));
     if (!reseller) return fail(404, 'Revendeur introuvable.');
-    const commentName = normalizeCommentName(query.get('commentName'));
-    if (!commentName) return fail(400, 'Indiquez le nom présent dans le commentaire.');
+    const rawFilter = String(query.get('commentName') || '').trim();
+    const commentName = rawFilter ? normalizeCommentName(rawFilter) : '';
+    if (rawFilter && !commentName) return fail(400, 'Ce filtre est trop long.');
     const router = await getOne('routers', reseller.router_id);
     if (!router) return fail(404, 'Routeur introuvable.');
     const sales = await getAll('sales');
@@ -3474,64 +3499,52 @@ async function handle(method, url, body) {
     const taken = new Set(onRouter.map((item) => item.name));
     const ticketOwner = new Map(onRouter.map((item) => [item.name, Number(item.reseller_id)]));
     let rows = [];
+    let activeNames = new Set();
     try {
-      rows = await listHotspotUsersByComment(router, commentName);
+      [rows, activeNames] = await Promise.all([
+        listHotspotUsers(router),
+        activeHotspotNames(router),
+      ]);
     } catch (error) {
       return fail(502, error.message || 'Impossible de lire les tickets.');
     }
     const groups = new Map();
     rows.forEach((row) => {
+      if (!row.name) return;
       const key = commentKey(row.comment);
       if (!groups.has(key)) groups.set(key, { comment: String(row.comment || '').trim(), tickets: [] });
       groups.get(key).tickets.push(row);
     });
     const lots = [];
-    let hidden = 0;
+    const me = Number(reseller.id);
     groups.forEach((group) => {
+      if (!commentKey(group.comment) || !lotMatchesQuery(group.comment, commentName)) return;
       const profiles = [...new Set(group.tickets.map((row) => row.profile).filter(Boolean))];
       profiles.sort((a, b) => a.localeCompare(b, 'fr'));
       const ownerIds = new Set();
       const fromBook = book.owners.get(commentKey(group.comment));
       if (fromBook) fromBook.forEach((id) => ownerIds.add(Number(id)));
       let count = 0;
-      let used = 0;
-      let assignedCount = 0;
       group.tickets.forEach((row) => {
         const ownerId = ticketOwner.get(row.name);
-        if (ownerId) {
-          ownerIds.add(Number(ownerId));
-          assignedCount += 1;
-        }
-        if (sold.has(row.name) || taken.has(row.name)) {
-          hidden += 1;
-          return;
-        }
-        if (ticketConsumed(row)) {
-          used += 1;
-          return;
-        }
+        if (ownerId) ownerIds.add(Number(ownerId));
+        if (sold.has(row.name) || taken.has(row.name) || activeNames.has(row.name) || ticketConsumed(row)) return;
         count += 1;
       });
-      const me = Number(reseller.id);
+      if (!count) return;
       const otherNames = [...ownerIds]
         .filter((id) => Number(id) !== me)
         .map((id) => book.names.get(Number(id)) || 'un revendeur')
         .filter(Boolean);
-      const mine = ownerIds.has(me);
+      if (otherNames.length) return;
       lots.push({
         comment: group.comment,
         profiles,
         count,
-        used,
-        assignedCount,
-        mine,
-        blocked: otherNames.length > 0,
-        owner: otherNames.join(', '),
-        ownerMine: mine ? (reseller.hmp_name || 'vous') : '',
       });
     });
     lots.sort((a, b) => a.comment.localeCompare(b.comment, 'fr'));
-    return ok({ commentName, lots, hidden });
+    return ok({ commentName, lots });
   }
 
   if (method === 'POST' && path === '/api/admin/lots') {
@@ -3541,13 +3554,15 @@ async function handle(method, url, body) {
     if (!comments.length) return fail(400, 'Cochez au moins un commentaire.');
     const router = await getOne('routers', reseller.router_id);
     if (!router) return fail(404, 'Routeur introuvable.');
-    const commentName = normalizeCommentName(body.commentName);
-    if (!commentName) return fail(400, 'Indiquez le nom présent dans le commentaire.');
-    const wanted = new Set(comments.filter((item) => commentMatchesName(item, commentName)).map((item) => commentKey(item)));
+    const wanted = new Set(comments.map((item) => commentKey(item)));
     if (!wanted.size) return fail(400, 'Cochez au moins un commentaire.');
     let rows = [];
+    let activeNames = new Set();
     try {
-      rows = await listHotspotUsersByComment(router, commentName);
+      [rows, activeNames] = await Promise.all([
+        listHotspotUsers(router),
+        activeHotspotNames(router),
+      ]);
     } catch (error) {
       return fail(502, error.message || 'Impossible de lire les tickets.');
     }
@@ -3556,7 +3571,7 @@ async function handle(method, url, body) {
     const sold = new Set(sales.filter((sale) => sale.router_id === router.id).map((sale) => sale.code));
     let count = 0;
     for (const row of rows) {
-      if (!wanted.has(commentKey(row.comment)) || sold.has(row.name) || ticketConsumed(row)) continue;
+      if (!wanted.has(commentKey(row.comment)) || sold.has(row.name) || activeNames.has(row.name) || ticketConsumed(row)) continue;
       if (otherOwnersOf(book, row.comment, reseller.id).length) continue;
       const existing = await getOne('assigned', `${router.id}:${row.name}`);
       if (existing) continue;

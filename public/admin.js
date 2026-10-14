@@ -41,6 +41,7 @@ const state = {
   loading: false,
   editingRouterId: 0,
   lotOpen: 0,
+  lotLoad: 0,
   lotName: '',
   lot: null,
   resellerQuery: '',
@@ -339,7 +340,7 @@ function renderResellers() {
           <button type="button" class="btn-sell" data-action="invite-reseller" data-id="${reseller.id}" ${state.busy || resellerParked(reseller.id) ? 'disabled' : ''}>
             Inviter
           </button>
-          <button type="button" class="btn-quiet" data-action="toggle-lot" data-id="${reseller.id}" ${resellerParked(reseller.id) ? 'disabled' : ''}>
+          <button type="button" class="btn-quiet" data-action="toggle-lot" data-id="${reseller.id}" ${state.busy || resellerParked(reseller.id) ? 'disabled' : ''}>
             ${state.lotOpen === reseller.id ? 'Fermer' : 'Attribuer'}
           </button>
           <button type="button" class="${reseller.active ? 'btn-danger' : 'btn-quiet'}" data-action="toggle-reseller" data-id="${reseller.id}" data-active="${reseller.active ? '0' : '1'}">
@@ -428,32 +429,28 @@ function renderResellers() {
   `;
 }
 
+async function loadResellerLots(resellerId, commentName = '') {
+  const params = new URLSearchParams({ resellerId: String(resellerId) });
+  const filter = String(commentName || '').trim();
+  if (filter) params.set('commentName', filter);
+  const result = await api(`/api/admin/lots?${params}`);
+  const lots = (result.lots || []).filter((item) => item.count > 0);
+  state.lotName = result.commentName || '';
+  state.lot = {
+    resellerId: Number(resellerId),
+    commentName: state.lotName,
+    lots,
+  };
+  return lots;
+}
+
 function renderLot(reseller) {
   const lot = state.lot && state.lot.resellerId === reseller.id ? state.lot : null;
-  const name = lot ? lot.commentName : (state.lotName || reseller.hmpName);
-  const lots = lot ? lot.lots : [];
+  const name = lot ? (lot.commentName || '') : (state.lotName || '');
+  const lots = (lot ? lot.lots : []).filter((item) => item.count > 0);
   const rows = lots.map((item) => {
     const profiles = (item.profiles || []).join(', ') || '—';
-    let detail = `${profiles} · ${item.count} ticket${item.count > 1 ? 's' : ''}`;
-    if (item.blocked && item.owner) {
-      detail = `Déjà attribué à ${item.owner}`;
-    } else if (!item.count && item.mine && item.ownerMine) {
-      detail = `Déjà attribué à ${item.ownerMine}`;
-    } else if (!item.count && item.owner) {
-      detail = `Déjà attribué à ${item.owner}`;
-    } else if (!item.count && item.used) {
-      detail = `${profiles} · ${item.used} connecté${item.used > 1 ? 's' : ''}`;
-    } else if (!item.count) {
-      detail = 'Déjà attribué';
-    } else if (item.used) {
-      detail += ` · ${item.used} connecté${item.used > 1 ? 's' : ''}`;
-    }
-    if (item.mine && item.count > 0 && item.ownerMine) {
-      detail += ` · déjà chez ${item.ownerMine}`;
-    }
-    if (item.blocked || !item.count) {
-      return `<div class="lot-line"><span>${esc(item.comment)}</span><span class="meta">${esc(detail)}</span></div>`;
-    }
+    const detail = `${profiles} · ${item.count} ticket${item.count > 1 ? 's' : ''}`;
     return `
       <label class="lot-line">
         <span><input type="checkbox" name="comments" value="${esc(item.comment)}"> ${esc(item.comment)}</span>
@@ -461,7 +458,7 @@ function renderLot(reseller) {
       </label>
     `;
   }).join('');
-  const ready = lots.filter((item) => item.count && !item.blocked).length;
+  const ready = lots.length;
   const held = reseller.assignedLots || [];
   const heldRows = held.map((item) => `
     <label class="lot-line">
@@ -479,15 +476,15 @@ function renderLot(reseller) {
       </form>
     ` : ''}
     <form data-form="lot-search" data-reseller="${reseller.id}" class="stack">
-      <label>Nom dans le commentaire</label>
+      <label for="lot-filter-${reseller.id}">Filtrer les lots libres</label>
       <div class="field-row">
-        <input name="commentName" value="${esc(name)}" required autocomplete="off">
-        <button type="submit">Chercher</button>
+        <input id="lot-filter-${reseller.id}" name="commentName" value="${esc(name)}" autocomplete="off" placeholder="Nom, mot-clé ou commentaire">
+        <button type="submit">Filtrer</button>
       </div>
     </form>
     ${lot ? `
-      <form data-form="lot-assign" data-reseller="${reseller.id}" data-comment="${esc(lot.commentName)}">
-        <p class="meta">${ready ? `${ready} dispo pour ${esc(lot.commentName)}` : (lots.length ? 'Déjà attribués ou connectés.' : 'Aucun commentaire.')}</p>
+      <form data-form="lot-assign" data-reseller="${reseller.id}" data-comment="${esc(lot.commentName || '')}">
+        <p class="meta">${ready ? `${ready} lot${ready > 1 ? 's' : ''} libre${ready > 1 ? 's' : ''}${name ? ` pour ${esc(name)}` : ''}.` : 'Aucun lot libre.'}</p>
         ${rows ? `<div class="lot-scroll">${rows}</div>` : ''}
         ${ready ? '<p class="meta" data-lot-count>Aucun coché.</p><button type="submit">Attribuer</button>' : ''}
       </form>
@@ -1179,7 +1176,7 @@ app.addEventListener('submit', async (event) => {
   const data = formData(form);
   const savedTop = rememberSheetScroll();
   const busyLabels = {
-    'lot-search': 'Recherche des tickets sur le routeur…',
+    'lot-search': 'Lecture des lots libres…',
     'lot-assign': 'Attribution des tickets…',
     'lot-remove': 'Retrait des commentaires…',
     login: 'Connexion…',
@@ -1302,16 +1299,9 @@ app.addEventListener('submit', async (event) => {
       return;
     }
     if (form.dataset.form === 'lot-search') {
-      const result = await api(`/api/admin/lots?resellerId=${encodeURIComponent(form.dataset.reseller)}&commentName=${encodeURIComponent(data.commentName)}`);
-      state.lotName = result.commentName;
-      const lots = result.lots || [];
-      state.lot = {
-        resellerId: Number(form.dataset.reseller),
-        commentName: result.commentName,
-        lots,
-      };
-      const ready = lots.filter((item) => item.count && !item.blocked).length;
-      showToast(ready ? `${ready} commentaire${ready > 1 ? 's' : ''} trouvé${ready > 1 ? 's' : ''}.` : 'Aucun commentaire pour ce nom.', ready ? 'ok' : 'err');
+      const lots = await loadResellerLots(Number(form.dataset.reseller), data.commentName || '');
+      const ready = lots.length;
+      showToast(ready ? `${ready} lot${ready > 1 ? 's' : ''} libre${ready > 1 ? 's' : ''}.` : 'Aucun lot libre.', ready ? 'ok' : 'err');
       return;
     }
     if (form.dataset.form === 'lot-assign') {
@@ -1324,16 +1314,20 @@ app.addEventListener('submit', async (event) => {
         method: 'POST',
         body: {
           resellerId: Number(form.dataset.reseller),
-          commentName: form.dataset.comment,
           comments,
         },
       });
+      const resellerId = Number(form.dataset.reseller);
+      const filter = state.lotName || '';
       state.lot = null;
       const assignedWord = `attribué${result.count > 1 ? 's' : ''}`;
       const assignedNote = result.published === false
         ? ' Le routeur n’a pas pris la liste : le téléphone se mettra à jour dès qu’il répond.'
         : '';
       await refresh(`${result.count} ticket${result.count > 1 ? 's' : ''} ${assignedWord}.${assignedNote}`, { fromSubmit: true });
+      if (state.lotOpen === resellerId) {
+        try { await loadResellerLots(resellerId, filter); } catch { /* la liste reste vide jusqu’au prochain filtre */ }
+      }
       return;
     }
     if (form.dataset.form === 'lot-remove') {
@@ -1353,12 +1347,17 @@ app.addEventListener('submit', async (event) => {
         method: 'POST',
         body: { resellerId: Number(form.dataset.reseller), comments },
       });
+      const resellerId = Number(form.dataset.reseller);
+      const filter = state.lotName || '';
       state.lot = null;
       const removedWord = `retiré${result.count > 1 ? 's' : ''}`;
       const removedNote = result.published === false
         ? ' Le routeur n’a pas pris la liste : le téléphone se mettra à jour dès qu’il répond.'
         : '';
       await refresh(`${result.count} ticket${result.count > 1 ? 's' : ''} ${removedWord}.${removedNote}`, { fromSubmit: true });
+      if (state.lotOpen === resellerId) {
+        try { await loadResellerLots(resellerId, filter); } catch { /* la liste reste vide jusqu’au prochain filtre */ }
+      }
       return;
     }
     if (form.dataset.form === 'stock') {
@@ -1645,15 +1644,36 @@ async function onAdminClick(event) {
   if (action === 'toggle-lot') {
     const id = Number(button.dataset.id);
     if (state.lotOpen === id) {
+      state.lotLoad = (state.lotLoad || 0) + 1;
       state.lotOpen = 0;
       state.lotName = '';
       state.lot = null;
-    } else {
-      state.lotOpen = id;
-      state.lotName = '';
-      state.lot = null;
+      render();
+      return;
     }
+    if (state.busy) return;
+    const token = (state.lotLoad || 0) + 1;
+    state.lotLoad = token;
+    state.lotOpen = id;
+    state.lotName = '';
+    state.lot = null;
+    state.busy = true;
+    showAppBusy('Lecture des lots libres…');
     render();
+    try {
+      const lots = await loadResellerLots(id, '');
+      if (state.lotLoad !== token) return;
+      const ready = lots.length;
+      showToast(ready ? `${ready} lot${ready > 1 ? 's' : ''} libre${ready > 1 ? 's' : ''}.` : 'Aucun lot libre.', ready ? 'ok' : 'err');
+    } catch (error) {
+      if (state.lotLoad === token) showToast(error.message, 'err');
+    } finally {
+      if (state.lotLoad === token) {
+        state.busy = false;
+        hideAppBusy();
+        render();
+      }
+    }
     return;
   }
   if (action === 'invite-reseller') {
